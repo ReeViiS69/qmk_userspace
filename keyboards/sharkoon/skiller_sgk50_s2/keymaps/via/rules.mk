@@ -1,8 +1,7 @@
+USER_NAME := sharkoon_sgk50_s2
+
 VIA_ENABLE = yes
 
 RGB_MATRIX_CUSTOM_USER = yes
-
-WS2812_DRIVER = custom
-OPT_DEFS += -DWB32_DMA_REQUIRED
 
 LTO_ENABLE = yes
