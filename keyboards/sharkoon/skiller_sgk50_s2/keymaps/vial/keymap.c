@@ -47,6 +47,35 @@ static uint8_t       sharkoon_macro_select_leds[MATRIX_ROWS * MATRIX_COLS];
 static uint8_t       sharkoon_recording_led              = NO_LED;
 static uint8_t       sharkoon_caps_lock_led              = NO_LED;
 static bool          sharkoon_caps_lock_active           = false;
+static const uint8_t sharkoon_disabled_leds[] = {
+    7, 8, 9, 10, 11, 12,
+    38, 39, 40, 41,
+    75, 76,
+    78, 79, 80, 81,
+};
+
+static void sharkoon_apply_disabled_led_flags(void) {
+    for (uint8_t i = 0; i < sizeof(sharkoon_disabled_leds); ++i) {
+        const uint8_t led = sharkoon_disabled_leds[i];
+
+        if (led < RGB_MATRIX_LED_COUNT) {
+            g_led_config.flags[led] = LED_FLAG_NONE;
+        }
+    }
+}
+
+static void sharkoon_clear_disabled_leds(void) {
+    for (uint8_t i = 0; i < sizeof(sharkoon_disabled_leds); ++i) {
+        const uint8_t led = sharkoon_disabled_leds[i];
+
+        if (led < RGB_MATRIX_LED_COUNT) {
+            rgb_matrix_set_color(led, 0, 0, 0);
+        }
+    }
+}
+void keyboard_post_init_user(void) {
+    sharkoon_apply_disabled_led_flags();
+}
 #endif
 
 static bool sharkoon_append_event(uint8_t event_type, uint8_t keycode) {
@@ -415,6 +444,7 @@ bool led_update_user(led_t led_state) {
 }
 
 bool rgb_matrix_indicators_user(void) {
+    sharkoon_clear_disabled_leds();
     // While selection is active, only re-scan when the effective layer stack
     // actually changed. The expensive matrix walk remains outside normal idle.
     if (sharkoon_macro_select_led_active) {
