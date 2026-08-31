@@ -14,8 +14,3 @@
 
 #define VIAL_UNLOCK_COMBO_ROWS {0, 4}
 #define VIAL_UNLOCK_COMBO_COLS {13, 18}
-/*
- * Replace QMK's stock Solid Reactive renderer while preserving the official
- * RGB_MATRIX_SOLID_REACTIVE mode ID used by VialRGB.
- */
-#define SOLID_REACTIVE SHARKOON_ORIGINAL_SOLID_REACTIVE
