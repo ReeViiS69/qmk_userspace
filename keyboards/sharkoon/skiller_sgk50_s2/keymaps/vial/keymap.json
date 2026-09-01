@@ -1,0 +1,5 @@
+{
+    "modules": ["getreuer/socd_cleaner",
+        "getreuer/palettefx"
+		]
+}
