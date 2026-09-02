@@ -15,8 +15,10 @@
 #include <stdint.h>
 #include <string.h>
 
-#define SHARKOON_NSR_IDLE 0u
-#define SHARKOON_NSR_HELD UINT32_MAX
+#define SHARKOON_NSR_IDLE              0u
+#define SHARKOON_NSR_HELD              UINT32_MAX
+#define SHARKOON_NSR_HELD_WORD_BITS    32u
+#define SHARKOON_NSR_HELD_WORDS        ((RGB_MATRIX_LED_COUNT + SHARKOON_NSR_HELD_WORD_BITS - 1u) / SHARKOON_NSR_HELD_WORD_BITS)
 
 /*
  * Per-LED state:
@@ -40,7 +42,17 @@ static uint32_t sharkoon_nsr_state[RGB_MATRIX_LED_COUNT];
  * every rendered LED. Instead, we scan the matrix only once at the beginning
  * of each RGB frame and cache the result by LED index.
  */
-static bool sharkoon_nsr_held[RGB_MATRIX_LED_COUNT];
+static uint32_t sharkoon_nsr_held[SHARKOON_NSR_HELD_WORDS];
+
+static void sharkoon_nsr_set_held(uint8_t led) {
+    sharkoon_nsr_held[led / SHARKOON_NSR_HELD_WORD_BITS] |=
+        UINT32_C(1) << (led % SHARKOON_NSR_HELD_WORD_BITS);
+}
+
+static bool sharkoon_nsr_is_held(uint8_t led) {
+    return (sharkoon_nsr_held[led / SHARKOON_NSR_HELD_WORD_BITS] &
+            (UINT32_C(1) << (led % SHARKOON_NSR_HELD_WORD_BITS))) != 0;
+}
 
 /*
  * One timestamp for the complete RGB frame so LEDs rendered in different
@@ -60,7 +72,7 @@ static void sharkoon_nsr_update_held_leds(void) {
             const uint8_t led = g_led_config.matrix_co[row][col];
 
             if (led != NO_LED && led < RGB_MATRIX_LED_COUNT) {
-                sharkoon_nsr_held[led] = true;
+                sharkoon_nsr_set_held(led);
             }
         }
     }
@@ -119,7 +131,7 @@ bool SOLID_REACTIVE(effect_params_t *params) {
          * Keep the key completely black for as long as it remains physically
          * pressed. No animation timer runs while the key is held.
          */
-        if (sharkoon_nsr_held[i]) {
+        if (sharkoon_nsr_is_held(i)) {
             sharkoon_nsr_state[i] = SHARKOON_NSR_HELD;
             hsv.v                  = 0;
         }

@@ -10,6 +10,7 @@
 #include "send_string_keycodes.h"
 #include "timer.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "sharkoon_sgk50_s2.h"
@@ -27,10 +28,22 @@ socd_cleaner_t socd_opposing_pairs[] = {
 #define SHARKOON_MACRO_MAX_ACTIONS      16
 #define SHARKOON_MACRO_EVENT_SIZE       3
 #define SHARKOON_MACRO_RECORDING_SIZE   (SHARKOON_MACRO_MAX_ACTIONS * 2 * SHARKOON_MACRO_EVENT_SIZE)
-#define SHARKOON_VIA_MACRO_BUFFER_MAX   4096
+// The recorder needs a RAM mirror of the dynamic macro area while replacing a
+// slot. The macro area can never be larger than the logical EEPROM minus the
+// dynamic keymap itself. VIA/Vial reserve additional NVM before the macro area,
+// so this intentionally remains a safe upper bound for Default, VIA and Vial.
+#define SHARKOON_VIA_MACRO_BUFFER_MAX \
+    (WEAR_LEVELING_LOGICAL_SIZE - (DYNAMIC_KEYMAP_LAYER_COUNT * MATRIX_ROWS * MATRIX_COLS * sizeof(uint16_t)))
 
 #define SHARKOON_MACRO_LED_BLINK_MS     400
 #define SHARKOON_NO_LAYER               0xFF
+
+#define SHARKOON_BITSET_WORD_BITS       32u
+#define SHARKOON_MATRIX_KEY_COUNT       (MATRIX_ROWS * MATRIX_COLS)
+#define SHARKOON_MATRIX_BITSET_WORDS    ((SHARKOON_MATRIX_KEY_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
+#ifdef RGB_MATRIX_ENABLE
+#    define SHARKOON_LED_BITSET_WORDS   ((RGB_MATRIX_LED_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
+#endif
 
 enum custom_keycodes {
     REC_M0 = QK_USER_0,
@@ -45,10 +58,33 @@ static uint8_t sharkoon_recording_slot          = 0;
 static uint8_t sharkoon_action_count            = 0;
 static uint8_t sharkoon_recording_length        = 0;
 static uint8_t sharkoon_pressed_count           = 0;
-static uint8_t sharkoon_recording_data[SHARKOON_MACRO_RECORDING_SIZE];
-static uint8_t sharkoon_recorded_key[MATRIX_ROWS][MATRIX_COLS];
-static bool    sharkoon_suppress_release[MATRIX_ROWS][MATRIX_COLS];
-static uint8_t sharkoon_via_macro_buffer[SHARKOON_VIA_MACRO_BUFFER_MAX];
+static uint8_t  sharkoon_recording_data[SHARKOON_MACRO_RECORDING_SIZE];
+static uint8_t  sharkoon_recorded_key[MATRIX_ROWS][MATRIX_COLS];
+static uint32_t sharkoon_suppress_release[SHARKOON_MATRIX_BITSET_WORDS];
+static uint8_t  sharkoon_via_macro_buffer[SHARKOON_VIA_MACRO_BUFFER_MAX];
+
+static uint16_t sharkoon_matrix_bit_index(uint8_t row, uint8_t col) {
+    return ((uint16_t)row * MATRIX_COLS) + col;
+}
+
+static void sharkoon_set_suppress_release(uint8_t row, uint8_t col) {
+    const uint16_t bit = sharkoon_matrix_bit_index(row, col);
+    sharkoon_suppress_release[bit / SHARKOON_BITSET_WORD_BITS] |=
+        UINT32_C(1) << (bit % SHARKOON_BITSET_WORD_BITS);
+}
+
+static bool sharkoon_take_suppress_release(uint8_t row, uint8_t col) {
+    const uint16_t bit  = sharkoon_matrix_bit_index(row, col);
+    uint32_t      *word = &sharkoon_suppress_release[bit / SHARKOON_BITSET_WORD_BITS];
+    const uint32_t mask = UINT32_C(1) << (bit % SHARKOON_BITSET_WORD_BITS);
+
+    if ((*word & mask) == 0) {
+        return false;
+    }
+
+    *word &= ~mask;
+    return true;
+}
 
 #ifdef RGB_MATRIX_ENABLE
 static bool     sharkoon_macro_blink_on       = false;
@@ -57,18 +93,46 @@ static uint8_t  sharkoon_recording_led        = NO_LED;
 static uint8_t  sharkoon_caps_lock_led        = NO_LED;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
-static uint8_t  sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][MATRIX_ROWS * MATRIX_COLS];
+static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
 static bool     sharkoon_keymap_cache_dirty   = false;
 
-static void sharkoon_clear_macro_select_leds(void) {
-    if (sharkoon_macro_select_layer >= DYNAMIC_KEYMAP_LAYER_COUNT) {
+static void sharkoon_macro_layer_add_led(uint8_t layer, uint8_t led) {
+    if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT || led >= RGB_MATRIX_LED_COUNT) {
         return;
     }
 
-    const uint8_t count = sharkoon_macro_layer_led_count[sharkoon_macro_select_layer];
-    for (uint8_t i = 0; i < count; ++i) {
-        rgb_matrix_set_color(sharkoon_macro_layer_leds[sharkoon_macro_select_layer][i], 0, 0, 0);
+    uint32_t      *word = &sharkoon_macro_layer_leds[layer][led / SHARKOON_BITSET_WORD_BITS];
+    const uint32_t mask = UINT32_C(1) << (led % SHARKOON_BITSET_WORD_BITS);
+
+    if ((*word & mask) == 0) {
+        *word |= mask;
+        ++sharkoon_macro_layer_led_count[layer];
     }
+}
+
+static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, uint8_t b) {
+    if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT) {
+        return;
+    }
+
+    for (uint8_t word = 0; word < SHARKOON_LED_BITSET_WORDS; ++word) {
+        uint32_t bits = sharkoon_macro_layer_leds[layer][word];
+
+        while (bits != 0) {
+            const uint8_t bit = (uint8_t)__builtin_ctz(bits);
+            const uint8_t led = (uint8_t)(word * SHARKOON_BITSET_WORD_BITS + bit);
+
+            if (led < RGB_MATRIX_LED_COUNT) {
+                rgb_matrix_set_color(led, r, g, b);
+            }
+
+            bits &= bits - 1u;
+        }
+    }
+}
+
+static void sharkoon_clear_macro_select_leds(void) {
+    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
 }
 
 static void sharkoon_start_macro_blink(void) {
@@ -109,6 +173,7 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
     sharkoon_macro_select_layer = SHARKOON_NO_LAYER;
 
     memset(sharkoon_macro_layer_led_count, 0, sizeof(sharkoon_macro_layer_led_count));
+    memset(sharkoon_macro_layer_leds, 0, sizeof(sharkoon_macro_layer_leds));
     sharkoon_caps_lock_led = NO_LED;
 
     uint8_t layer_count = dynamic_keymap_get_layer_count();
@@ -147,10 +212,7 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
                     }
 
                     if (keycode == REC_M0 || keycode == REC_M1) {
-                        uint8_t *count = &sharkoon_macro_layer_led_count[top_layer];
-                        if (*count < MATRIX_ROWS * MATRIX_COLS) {
-                            sharkoon_macro_layer_leds[top_layer][(*count)++] = led;
-                        }
+                        sharkoon_macro_layer_add_led(top_layer, led);
                     }
                     break;
                 }
@@ -453,14 +515,13 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     // A custom control key can resolve to a different keycode on release after
     // changing the layer state. Suppress that physical release by matrix
     // position so no release from the newly exposed key can escape to the host.
-    if (!record->event.pressed && sharkoon_suppress_release[row][col]) {
-        sharkoon_suppress_release[row][col] = false;
+    if (!record->event.pressed && sharkoon_take_suppress_release(row, col)) {
         return false;
     }
 
     switch (keycode) {
         case MACRO_SELECT:
-            sharkoon_suppress_release[row][col] = true;
+            sharkoon_set_suppress_release(row, col);
 
             if (record->event.pressed) {
                 if (is_layer_locked(1) && layer_state_is(2)) {
@@ -477,7 +538,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
         case REC_M0:
         case REC_M1:
-            sharkoon_suppress_release[row][col] = true;
+            sharkoon_set_suppress_release(row, col);
             if (record->event.pressed) {
                 // Leave the macro-selection stack deterministically: layer 2
                 // must be off and the temporary layer-1 lock must be released.
@@ -495,7 +556,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             return false;
 
         case REC_STOP:
-            sharkoon_suppress_release[row][col] = true;
+            sharkoon_set_suppress_release(row, col);
             if (record->event.pressed && sharkoon_recording) {
                 sharkoon_finish_recording(true);
             }
@@ -513,7 +574,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     // while recording so a stored macro cannot recursively play into a capture.
     if (keycode >= QK_MACRO && keycode <= QK_MACRO_MAX) {
         if (record->event.pressed) {
-            sharkoon_suppress_release[row][col] = true;
+            sharkoon_set_suppress_release(row, col);
         }
         return false;
     }
@@ -597,15 +658,11 @@ bool rgb_matrix_indicators_user(void) {
     }
 
     // The active layer view was already fully resolved when the keymap cache was
-    // rebuilt. RGB frames only render the cached LED list; no keymap scan occurs.
-    const uint8_t count = sharkoon_macro_layer_led_count[sharkoon_macro_select_layer];
-    for (uint8_t i = 0; i < count; ++i) {
-        const uint8_t led = sharkoon_macro_layer_leds[sharkoon_macro_select_layer][i];
-        if (sharkoon_macro_blink_on) {
-            rgb_matrix_set_color(led, status_rgb.r, status_rgb.g, status_rgb.b);
-        } else {
-            rgb_matrix_set_color(led, 0, 0, 0);
-        }
+    // rebuilt. RGB frames only render the cached LED bitset; no keymap scan occurs.
+    if (sharkoon_macro_blink_on) {
+        sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, status_rgb.r, status_rgb.g, status_rgb.b);
+    } else {
+        sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
     }
 
     return true;
