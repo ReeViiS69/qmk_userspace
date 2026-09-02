@@ -417,7 +417,16 @@ static void sharkoon_save_recording(void) {
 
     const uint16_t old_macro_size = (macro_end - macro_start) + 1; // includes terminating NUL
     const uint16_t new_macro_size = (uint16_t)sharkoon_recording_length + 1;
-    const int32_t  size_delta     = (int32_t)new_macro_size - (int32_t)old_macro_size;
+
+    // No persistent state changes when the slot already contains exactly the
+    // same macro. In particular, avoid toggling the macro-buffer valid flag
+    // from 0 -> 0xFF -> 0 for a no-op save.
+    if (old_macro_size == new_macro_size &&
+        memcmp(&sharkoon_via_macro_buffer[macro_start], sharkoon_recording_data, sharkoon_recording_length) == 0) {
+        return;
+    }
+
+    const int32_t size_delta = (int32_t)new_macro_size - (int32_t)old_macro_size;
     const uint16_t tail_start     = macro_end + 1;
     const uint16_t tail_size      = used_end - tail_start;
 
@@ -524,7 +533,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             sharkoon_set_suppress_release(row, col);
 
             if (record->event.pressed) {
-                if (is_layer_locked(1) && layer_state_is(2)) {
+                if (is_layer_locked(1) || layer_state_is(2)) {
                     // Macro-Auswahl abbrechen
                     layer_lock_off(1);
                     layer_off(2);
