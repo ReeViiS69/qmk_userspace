@@ -22,6 +22,7 @@
 #endif
 
 #include "socd_cleaner.h"
+#include "unicode_typing.h"
 socd_cleaner_t socd_opposing_pairs[] = {
     {{KC_A, KC_D}, SOCD_CLEANER_LAST},
 };
@@ -50,6 +51,7 @@ enum custom_keycodes {
     REC_M1 = QK_USER_1,
     REC_STOP = QK_USER_2,
     MACRO_SELECT = QK_USER_3,
+    UNICODE_TYPING_CYCLE = QK_USER_4,
 };
 
 static bool    sharkoon_recording              = false;
@@ -529,6 +531,17 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     }
 
     switch (keycode) {
+        case UNICODE_TYPING_CYCLE:
+            sharkoon_set_suppress_release(row, col);
+            if (record->event.pressed) {
+                uint8_t next_mode = get_unicode_typing_mode() + 1;
+                if (next_mode >= UNCODES_MODE_END) {
+                    next_mode = UCTM_NO_MODE;
+                }
+                set_unicode_typing_mode(next_mode);
+            }
+            return false;
+
         case MACRO_SELECT:
             sharkoon_set_suppress_release(row, col);
 
@@ -681,7 +694,7 @@ bool rgb_matrix_indicators_user(void) {
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     [0] = LAYOUT_all(
-        KC_ESC,  KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,   KC_F6,   KC_F7,   KC_F8,   KC_F9,    KC_F10,   KC_F11,  KC_F12,  KC_NO,   KC_NO,   KC_NO,    KC_NO,    KC_PAUS,  RM_TOGG,
+        KC_ESC,  KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,   KC_F6,   KC_F7,   KC_F8,   KC_F9,    KC_F10,   KC_F11,  KC_F12,  KC_NO,   KC_NO,   KC_NO,    UNICODE_TYPING_CYCLE,    KC_PAUS,  RM_TOGG,
         KC_GRV,  KC_1,    KC_2,    KC_3,    KC_4,    KC_5,    KC_6,    KC_7,    KC_8,    KC_9,     KC_0,     KC_MINS, KC_EQL,  KC_BSPC,          KC_DEL,   KC_HOME,  KC_PGUP,  KC_NO,
         KC_TAB,  KC_Q,    KC_W,    KC_E,    KC_R,    KC_T,    KC_Y,    KC_U,    KC_I,    KC_O,     KC_P,     KC_LBRC, KC_RBRC, KC_BSLS,          KC_INS,   KC_END,   KC_PGDN,  MS_BTN3,
         KC_CAPS, KC_A,    KC_S,    KC_D,    KC_F,    KC_G,    KC_H,    KC_J,    KC_K,    KC_L,     KC_SCLN,  KC_QUOT,          KC_ENT,           MS_BTN1, MS_UP,    MS_BTN2,

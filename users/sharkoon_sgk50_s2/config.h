@@ -6,6 +6,12 @@
 #define NKRO_DEFAULT_ON true
 
 /*
+ * Unicode typing uses WinCompose on Windows.
+ * WinCompose must be installed on the host for Unicode output to work.
+ */
+#define UNICODE_SELECTED_MODES UNICODE_MODE_WINCOMPOSE
+
+/*
  * Space Cadet for a German Windows layout:
  * tap Left Shift  -> (  = Shift+8 on German QWERTZ
  * tap Right Shift -> )  = Shift+9 on German QWERTZ
