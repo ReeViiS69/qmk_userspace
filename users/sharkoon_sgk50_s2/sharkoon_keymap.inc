@@ -533,14 +533,14 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             sharkoon_set_suppress_release(row, col);
 
             if (record->event.pressed) {
-                if (is_layer_locked(1) || layer_state_is(2)) {
+                if (is_layer_locked(1) || layer_state_is(3)) {
                     // Macro-Auswahl abbrechen
                     layer_lock_off(1);
-                    layer_off(2);
+                    layer_off(3);
                 } else {
                     // Macro-Auswahl starten
                     layer_lock_on(1);
-                    layer_on(2);
+                    layer_on(3);
                 }
             }
             return false;
@@ -549,10 +549,10 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         case REC_M1:
             sharkoon_set_suppress_release(row, col);
             if (record->event.pressed) {
-                // Leave the macro-selection stack deterministically: layer 2
+                // Leave the macro-selection stack deterministically: layer 3
                 // must be off and the temporary layer-1 lock must be released.
                 layer_lock_off(1);
-                layer_off(2);
+                layer_off(3);
 
                 // Keep support for recorder keys reached through any unrelated
                 // one-shot layer the user may configure elsewhere.
@@ -681,16 +681,16 @@ bool rgb_matrix_indicators_user(void) {
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     [0] = LAYOUT_all(
-        KC_ESC,  KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,   KC_F6,   KC_F7,   KC_F8,   KC_F9,   KC_F10,  KC_F11,  KC_F12,  KC_NO,   KC_NO,   KC_NO,    KC_NO,    KC_PAUS,  RM_TOGG,
-        KC_GRV,  KC_1,    KC_2,    KC_3,    KC_4,    KC_5,    KC_6,    KC_7,    KC_8,    KC_9,    KC_0,    KC_MINS, KC_EQL,  KC_BSPC,          KC_DEL,   KC_HOME,  KC_PGUP,  KC_NO,
-        KC_TAB,  KC_Q,    KC_W,    KC_E,    KC_R,    KC_T,    KC_Y,    KC_U,    KC_I,    KC_O,    KC_P,    KC_LBRC, KC_RBRC, KC_BSLS,          KC_INS,   KC_END,   KC_PGDN,  MS_BTN3,
-        KC_CAPS, KC_A,    KC_S,    KC_D,    KC_F,    KC_G,    KC_H,    KC_J,    KC_K,    KC_L,    KC_SCLN, KC_QUOT,          KC_ENT,           MS_BTN1, MS_UP,    MS_BTN2,
-        KC_LSFT, KC_NUBS, KC_Z,    KC_X,    KC_C,    KC_V,    KC_B,    KC_N,    KC_M,    KC_COMM, KC_DOT,  KC_SLSH,          KC_RSFT, KC_UP,   MS_LEFT,  MS_DOWN,  MS_RGHT,  KC_MPLY,
-        KC_LCTL, KC_LGUI, KC_LALT,                            KC_SPC,                             KC_RALT, MO(1),   KC_RCTL, KC_LEFT, KC_DOWN,  KC_RGHT, KC_NO,    KC_NO
+        KC_ESC,  KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,   KC_F6,   KC_F7,   KC_F8,   KC_F9,    KC_F10,   KC_F11,  KC_F12,  KC_NO,   KC_NO,   KC_NO,    KC_NO,    KC_PAUS,  RM_TOGG,
+        KC_GRV,  KC_1,    KC_2,    KC_3,    KC_4,    KC_5,    KC_6,    KC_7,    KC_8,    KC_9,     KC_0,     KC_MINS, KC_EQL,  KC_BSPC,          KC_DEL,   KC_HOME,  KC_PGUP,  KC_NO,
+        KC_TAB,  KC_Q,    KC_W,    KC_E,    KC_R,    KC_T,    KC_Y,    KC_U,    KC_I,    KC_O,     KC_P,     KC_LBRC, KC_RBRC, KC_BSLS,          KC_INS,   KC_END,   KC_PGDN,  MS_BTN3,
+        KC_CAPS, KC_A,    KC_S,    KC_D,    KC_F,    KC_G,    KC_H,    KC_J,    KC_K,    KC_L,     KC_SCLN,  KC_QUOT,          KC_ENT,           MS_BTN1, MS_UP,    MS_BTN2,
+        SC_LSPO, KC_NUBS, KC_Z,    KC_X,    KC_C,    KC_V,    KC_B,    KC_N,    KC_M,    KC_COMM,  KC_DOT,   KC_SLSH,          SC_RSPC, KC_UP,   MS_LEFT,  MS_DOWN,  MS_RGHT,  KC_MPLY,
+        KC_LCTL, KC_LGUI, KC_LALT,                            KC_SPC,                                  KC_RALT, MO(1),   KC_RCTL, KC_LEFT, KC_DOWN,  KC_RGHT, TG(2),    KC_NO
     ),
 
     [1] = LAYOUT_all(
-        _______, KC_MPLY, KC_MPRV, KC_MNXT, KC_MUTE,  KC_VOLD, KC_VOLU, RM_SPDD,  RM_SPDU,  QK_MACRO_0, QK_MACRO_1, KC_PSCR, KC_SCRL, _______, EE_CLR,   _______,  _______,  _______,  _______,
+        _______, KC_MPLY, KC_MPRV, KC_MNXT, KC_MUTE,  KC_VOLD, KC_VOLU, RM_SPDD,  RM_SPDU,  QK_MACRO_0, QK_MACRO_1, KC_PSCR, KC_SCRL, _______, EE_CLR,   _______,  _______,  SOCDTOG,  _______,
         _______, _______, _______, _______, _______,  _______, _______, _______,  _______,  _______,   _______,   _______, _______,    _______,          _______,  _______,  _______,  _______,
         MACRO_SELECT, _______, _______, _______, _______,  _______, _______, _______,  _______,  _______,   _______,   _______, _______,    _______,          _______,  _______,  _______,  _______,
         REC_STOP,_______, _______, _______, _______,  _______, _______, _______,  _______,  _______,   _______,   _______,             _______,          QK_MACRO_2, QK_MACRO_3, QK_MACRO_4,
@@ -698,12 +698,30 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         _______, GU_TOGG, _______,                             _______,                                _______,   _______,   _______, RM_HUEU, RM_VALD,  RM_NEXT,   _______,   _______
     ),
 
+    // German-on-US raw compatibility.
+    // Layer 2 = the unshifted German character positions encoded as US HID.
+    // The two physical Shift keys do not send Shift here; they only hold layer 3.
     [2] = LAYOUT_all(
-        _______, _______, _______, _______, _______, _______, _______, _______, _______, REC_M0,  REC_M1,  _______, _______, _______, _______, _______, _______, SOCDTOG, _______,
-        _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,          _______, _______, _______, _______,
-        _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,          _______, _______, _______, _______,
-        _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,          _______,          _______, _______, _______,
-        _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,          _______, _______, _______, _______, _______, _______,
-        _______, _______, _______,                            _______,                            _______, _______, _______, _______, _______, _______, _______, _______
+        _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,
+        KC_CIRC, KC_1,    KC_2,    KC_3,    KC_4,    KC_5,    KC_6,    KC_7,    KC_8,    KC_9,    KC_0,    KC_MINS, KC_EQL,  _______,          _______, _______, _______, _______,
+        _______, KC_Q,    KC_W,    KC_E,    KC_R,    KC_T,    KC_Z,    KC_U,    KC_I,    KC_O,    KC_P,    KC_LBRC, KC_PLUS, KC_HASH,          _______, _______, _______, _______,
+        _______, KC_A,    KC_S,    KC_D,    KC_F,    KC_G,    KC_H,    KC_J,    KC_K,    KC_L,    KC_SCLN, KC_QUOT,          _______,          _______, _______, _______,
+        MO(3),   KC_LABK, KC_Y,    KC_X,    KC_C,    KC_V,    KC_B,    KC_N,    KC_M,    KC_COMM, KC_DOT,  KC_MINS,          MO(3),   _______, _______, _______, _______, _______,
+        _______, _______, _______,                            _______,                            _______, _______, _______, _______, _______, _______, TG(2),    _______
+    ),
+
+    // Layer 3 serves two jobs intentionally:
+    // 1) shifted half of the raw compatibility layout while either Shift key on
+    //    layer 2 is held, and
+    // 2) the macro-selection layer activated by MACRO_SELECT.
+    // REC_M0/REC_M1 live on the first two keys right of F12. MACRO_SELECT is
+    // additionally available on the key immediately left of Pause.
+    [3] = LAYOUT_all(
+        S(KC_ESC), S(KC_F1), S(KC_F2), S(KC_F3), S(KC_F4), S(KC_F5), S(KC_F6), S(KC_F7), S(KC_F8), S(KC_F9), S(KC_F10), S(KC_F11), S(KC_F12), REC_M0, REC_M1, _______, MACRO_SELECT, S(KC_PAUS), _______,
+        KC_CIRC, KC_EXLM, KC_DQUO, KC_HASH, KC_DLR, KC_PERC, KC_AMPR, KC_SLSH, KC_LPRN, KC_RPRN, KC_EQL, KC_QUES, KC_GRV, S(KC_BSPC),          S(KC_DEL), S(KC_HOME), S(KC_PGUP), _______,
+        S(KC_TAB), S(KC_Q), S(KC_W), S(KC_E), S(KC_R), S(KC_T), S(KC_Z), S(KC_U), S(KC_I), S(KC_O), S(KC_P), KC_LCBR, KC_ASTR, KC_QUOT,          S(KC_INS), S(KC_END), S(KC_PGDN), _______,
+        _______, S(KC_A), S(KC_S), S(KC_D), S(KC_F), S(KC_G), S(KC_H), S(KC_J), S(KC_K), S(KC_L), KC_COLN, KC_DQUO,          S(KC_ENT),          _______, _______, _______,
+        _______, KC_RABK, S(KC_Y), S(KC_X), S(KC_C), S(KC_V), S(KC_B), S(KC_N), S(KC_M), KC_SCLN, KC_COLN, KC_UNDS,          _______, S(KC_UP), _______, _______, _______, _______,
+        _______, _______, _______,                            S(KC_SPC),                            _______, _______, _______, S(KC_LEFT), S(KC_DOWN), S(KC_RGHT), KC_NO,    _______
     ),
 };

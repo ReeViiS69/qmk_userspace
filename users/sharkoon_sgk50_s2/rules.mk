@@ -6,6 +6,7 @@ SRC += sharkoon_sgk50_s2.c
 LTO_ENABLE = yes
 
 # Common QMK features
+COMMAND_ENABLE = no
 BOOTMAGIC_ENABLE = yes
 RAW_ENABLE = yes
 SEND_STRING_ENABLE = yes

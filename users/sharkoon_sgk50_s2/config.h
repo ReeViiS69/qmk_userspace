@@ -6,6 +6,14 @@
 #define NKRO_DEFAULT_ON true
 
 /*
+ * Space Cadet for a German Windows layout:
+ * tap Left Shift  -> (  = Shift+8 on German QWERTZ
+ * tap Right Shift -> )  = Shift+9 on German QWERTZ
+ */
+#define LSPO_KEYS KC_LSFT, KC_LSFT, KC_8
+#define RSPC_KEYS KC_RSFT, KC_RSFT, KC_9
+
+/*
  * Replace QMK's stock Solid Reactive renderer while preserving the official
  * RGB_MATRIX_SOLID_REACTIVE mode ID.
  */
