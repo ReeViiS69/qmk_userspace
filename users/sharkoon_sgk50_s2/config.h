@@ -1,6 +1,31 @@
 #pragma once
 
 /*
+ * Storage layout for this confirmed SGK50 S2 hardware:
+ * - WB32FQ95xC: 256 KiB internal flash / 36 KiB SRAM
+ * - W25Q32:     4 MiB external SPI NOR flash
+ *
+ * Eight dynamic layers use 8 * 6 * 19 * 2 = 1824 bytes.
+ * A 4096-byte logical EEPROM leaves 2272 bytes outside the dynamic keymap,
+ * exactly twice the old 2048-byte / 4-layer remainder of 1136 bytes.
+ * Wear leveling keeps its existing 2:1 backing/logical ratio.
+ */
+#undef EXTERNAL_FLASH_SIZE
+#define EXTERNAL_FLASH_SIZE (4 * 1024 * 1024)
+
+#undef WEAR_LEVELING_BACKING_SIZE
+#define WEAR_LEVELING_BACKING_SIZE 8192
+
+#undef WEAR_LEVELING_LOGICAL_SIZE
+#define WEAR_LEVELING_LOGICAL_SIZE 4096
+
+#undef DYNAMIC_KEYMAP_LAYER_COUNT
+#define DYNAMIC_KEYMAP_LAYER_COUNT 8
+
+#undef DYNAMIC_KEYMAP_EEPROM_MAX_ADDR
+#define DYNAMIC_KEYMAP_EEPROM_MAX_ADDR 4095
+
+/*
  * Keep NKRO enabled by default
  */
 #define NKRO_DEFAULT_ON true
