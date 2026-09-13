@@ -1,5 +1,10 @@
+# gpio dma rgb driver
 WS2812_DRIVER = custom
 OPT_DEFS += -DWB32_DMA_REQUIRED
+
+# atleast my sharkoon_sgk50_s2 has C variant but qmk assumes b which limits mcu to 28kb ram and 128kb onboard flash.
+MCU_LDSCRIPT = WB32FQ95xC
+OPT_DEFS += -DWB32FQ95xC
 
 SRC += sharkoon_sgk50_s2.c
 

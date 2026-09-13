@@ -5,19 +5,40 @@
  */
 #define NKRO_DEFAULT_ON true
 
+//enable socd for mousekeys aswell, custom setting, not a socd default
+#define SOCD_CLEANER_MOUSEKEY_ENABLE
+
 /*
  * Unicode typing uses WinCompose on Windows.
  * WinCompose must be installed on the host for Unicode output to work.
  */
 #define UNICODE_SELECTED_MODES UNICODE_MODE_WINCOMPOSE
+//#define TAP_CODE_DELAY 20
+#define UNICODE_TYPE_DELAY 25
 
-/*
- * Space Cadet for a German Windows layout:
- * tap Left Shift  -> (  = Shift+8 on German QWERTZ
- * tap Right Shift -> )  = Shift+9 on German QWERTZ
- */
+// ─────────────────────────────────────────────
+// Space Cadet – deutsches Tastaturlayout
+// Format:
+// HOLD_MODIFIER, TAP_MODIFIER, TAP_KEY
+// ─────────────────────────────────────────────
+
+// Shift
+// Tap: ( / )
+// Hold: Left / Right Shift
 #define LSPO_KEYS KC_LSFT, KC_LSFT, KC_8
 #define RSPC_KEYS KC_RSFT, KC_RSFT, KC_9
+
+// Ctrl
+// Tap: { / }
+// Hold: Left / Right Ctrl
+#define LCPO_KEYS KC_LCTL, KC_RALT, KC_7
+#define RCPC_KEYS KC_RCTL, KC_RALT, KC_0
+
+// Alt / AltGr
+// Tap: [ / ]
+// Hold: Left Alt / Right Alt (AltGr)
+#define LAPO_KEYS KC_LALT, KC_RALT, KC_8
+#define RAPC_KEYS KC_RALT, KC_RALT, KC_9
 
 /*
  * Replace QMK's stock Solid Reactive renderer while preserving the official
@@ -44,7 +65,3 @@
 #define CYCLE_SPIRAL        SHARKOON_ORIGINAL_CYCLE_SPIRAL
 #define PIXEL_RAIN          SHARKOON_ORIGINAL_PIXEL_RAIN
 
-#define SOCD_CLEANER_MOUSEKEY_ENABLE
-
-//#define TAP_CODE_DELAY 20
-#define UNICODE_TYPE_DELAY 25
