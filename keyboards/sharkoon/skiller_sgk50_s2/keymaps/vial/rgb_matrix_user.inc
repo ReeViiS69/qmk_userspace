@@ -362,14 +362,34 @@ static void sharkoon_prepare_hybrid_frame(void) {
             1 + speed / 8
         );
 
+    /*
+     * Reuse the exact 256-entry sin8 LUT that the per-LED flow path already
+     * uses. QMK's cos8(theta) is exactly sin8(theta + 64), so all three
+     * frame-level trig calls can become direct flash reads with identical
+     * uint8_t wrap semantics.
+     */
+    const uint8_t flow_phase_quarter =
+        (uint8_t)(sharkoon_hybrid_frame.flow_time / 4);
+
     sharkoon_hybrid_frame.rot_c =
-        cos8(sharkoon_hybrid_frame.flow_time / 4) - 128;
+        (int8_t)(
+            pgm_read_byte(
+                &sharkoon_sin8_lut[(uint8_t)(flow_phase_quarter + 64u)]
+            ) - 128
+        );
 
     sharkoon_hybrid_frame.rot_s =
-        sin8(sharkoon_hybrid_frame.flow_time / 4) - 128;
+        (int8_t)(
+            pgm_read_byte(
+                &sharkoon_sin8_lut[flow_phase_quarter]
+            ) - 128
+        );
 
     sharkoon_hybrid_frame.omega =
-        32 + sin8(sharkoon_hybrid_frame.flow_time) / 4;
+        32 +
+        pgm_read_byte(
+            &sharkoon_sin8_lut[(uint8_t)sharkoon_hybrid_frame.flow_time]
+        ) / 4;
 
     sharkoon_hybrid_frame.sparkle_time =
         (uint8_t)sharkoon_hybrid_frame.flow_time;
