@@ -17,6 +17,9 @@ bool sharkoon_direct_stream_active(void);
 #    error "SHARKOON HYBRID requires RGB_MATRIX_KEYREACTIVE_ENABLED"
 #endif
 
+#define SHARKOON_PALETTE_COLOR_COUNT 16u
+#define SHARKOON_REACTIVE_RADIUS     16u
+#define SHARKOON_REACTIVE_DIAMETER   (SHARKOON_REACTIVE_RADIUS * 2u)
 
 /*
  * =============================================================
@@ -37,7 +40,7 @@ bool sharkoon_direct_stream_active(void);
  * globale Helligkeit GANZ AM ENDE
  */
 
-static hsv_t sharkoon_unpack_hsv16(uint16_t packed) {
+static inline hsv_t sharkoon_unpack_hsv16(uint16_t packed) {
     return (hsv_t) {
         .h = (uint8_t)packed,
         .s = ((uint8_t)(packed >> 8) & 0x0F) * 17,
@@ -45,11 +48,7 @@ static hsv_t sharkoon_unpack_hsv16(uint16_t packed) {
     };
 }
 
-
-static hsv_t sharkoon_palette_interp_raw(
-    const uint16_t *palette,
-    uint8_t x
-) {
+static inline hsv_t sharkoon_palette_interp_raw(const hsv_t *palette, uint8_t x) {
     /*
      * Gleiche Positionierung wie PaletteFx.
      */
@@ -60,21 +59,10 @@ static hsv_t sharkoon_palette_interp_raw(
                    ? (x - 8)
                    : 239);
 
-    const uint8_t i =
-        x >> 4;
-
-    const uint8_t frac =
-        x << 4;
-
-    hsv_t a =
-        sharkoon_unpack_hsv16(
-            pgm_read_word(&palette[i])
-        );
-
-    hsv_t b =
-        sharkoon_unpack_hsv16(
-            pgm_read_word(&palette[i + 1])
-        );
+    const uint8_t i    = x >> 4;
+    const uint8_t frac = x << 4;
+    const hsv_t   a    = palette[i];
+    const hsv_t   b    = palette[i + 1];
 
     const uint8_t hue_wrap =
         128 &
@@ -108,20 +96,17 @@ static hsv_t sharkoon_palette_interp_raw(
     };
 }
 
-
 /*
  * RGB-Farbe Richtung Weiß mischen.
  *
- * Genau das brauchen Sparkle und Reactive:
- *
- * - heller
- * - weniger gesättigt
- * - gleicher Grundfarbton
+ * amount == 0 ist der häufigste Fall außerhalb von Sparkles/Reactive-Zonen
+ * und kann ohne drei scale8/qadd8-Paare sofort zurückkehren.
  */
-static rgb_t sharkoon_mix_white(
-    rgb_t rgb,
-    uint8_t amount
-) {
+static inline rgb_t sharkoon_mix_white(rgb_t rgb, uint8_t amount) {
+    if (amount == 0) {
+        return rgb;
+    }
+
     rgb.r =
         qadd8(
             rgb.r,
@@ -152,6 +137,197 @@ static rgb_t sharkoon_mix_white(
     return rgb;
 }
 
+/*
+ * Exakte Lookup-Tabelle für den bisherigen Reactive-Falloff:
+ *
+ *   dist = sqrt16(dist_sqr)
+ *   distance_falloff = 255 - (dist * 255) / 16
+ *   feathered_falloff = scale8(distance_falloff, distance_falloff)
+ *
+ * dist_sqr ist nach der Radiusprüfung immer 0..255. Damit können sqrt16(),
+ * die 16-Bit-Division und das abschließende scale8() vollständig aus dem
+ * LED-x-Hit-Hotpath verschwinden. Der Wert an Index 0 berücksichtigt beide
+ * möglichen QMK/FastLED-scale8-Semantiken; alle übrigen 255 Werte sind gleich.
+ */
+static const uint8_t PROGMEM sharkoon_reactive_falloff[256] = {
+#if FASTLED_SCALE8_FIXED == 1
+    255,
+#else
+    254,
+#endif
+    225, 225, 225, 196, 196, 196, 196, 196, 169, 169, 169, 169, 169, 169, 169,
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 121, 121, 121, 121, 121, 121, 121,
+    121, 121, 121, 121, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+    100,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,
+     64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,
+     64,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,
+     49,  49,  49,  49,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,
+     36,  36,  36,  36,  36,  36,  36,  36,  36,  25,  25,  25,  25,  25,  25,  25,
+     25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,
+     16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,
+     16,  16,  16,  16,  16,  16,  16,  16,  16,   9,   9,   9,   9,   9,   9,   9,
+      9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,
+      9,   9,   9,   9,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,
+      4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,
+      4,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+};
+
+/*
+ * Alles, was innerhalb eines vollständigen RGB-Frames konstant bleibt, wird
+ * einmal bei params->iter == 0 vorbereitet. QMK kann denselben Frame über
+ * mehrere RGB_MATRIX_LED_PROCESS_LIMIT-Chunks verteilen; diese Chunks lesen
+ * danach nur noch den Snapshot.
+ */
+typedef struct {
+    bool    direct_stream_active;
+    hsv_t   palette[SHARKOON_PALETTE_COLOR_COUNT];
+    uint16_t flow_time;
+    int8_t  rot_c;
+    int8_t  rot_s;
+    uint8_t omega;
+    uint8_t sparkle_time;
+    uint8_t minimum_hue;
+    uint8_t effective_value;
+    uint8_t hit_count;
+    uint8_t hit_x[LED_HITS_TO_REMEMBER];
+    uint8_t hit_y[LED_HITS_TO_REMEMBER];
+    uint8_t hit_amplitude[LED_HITS_TO_REMEMBER];
+} sharkoon_hybrid_frame_t;
+
+static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
+static bool                    sharkoon_hybrid_frame_ready;
+
+static void sharkoon_prepare_hybrid_frame(void) {
+    sharkoon_hybrid_frame.direct_stream_active = sharkoon_direct_stream_active();
+
+    /*
+     * Im echten Direct-Modus wird der gesamte restliche Hybrid-State nicht
+     * gebraucht. Den Snapshot erst vorbereiten, wenn tatsächlich gerendert wird.
+     */
+    if (sharkoon_hybrid_frame.direct_stream_active) {
+        return;
+    }
+
+    const uint16_t *palette = palettefx_get_palette_data();
+
+    /*
+     * Die Palette enthält genau 16 Stützfarben. Vorher wurden pro LED zwei
+     * pgm_read_word() + Unpack ausgeführt; jetzt einmal pro Frame pro Farbe.
+     */
+    for (uint8_t i = 0; i < SHARKOON_PALETTE_COLOR_COUNT; ++i) {
+        sharkoon_hybrid_frame.palette[i] =
+            sharkoon_unpack_hsv16(
+                pgm_read_word(&palette[i])
+            );
+    }
+
+    const uint8_t speed        = rgb_matrix_config.speed;
+    const uint8_t global_value = rgb_matrix_config.hsv.v;
+
+    /*
+     * =========================================================
+     * FLOW STATE
+     * =========================================================
+     */
+    sharkoon_hybrid_frame.flow_time =
+        palettefx_scaled_time(
+            g_rgb_timer,
+            1 + speed / 8
+        );
+
+    sharkoon_hybrid_frame.rot_c =
+        cos8(sharkoon_hybrid_frame.flow_time / 4) - 128;
+
+    sharkoon_hybrid_frame.rot_s =
+        sin8(sharkoon_hybrid_frame.flow_time / 4) - 128;
+
+    sharkoon_hybrid_frame.omega =
+        32 + sin8(sharkoon_hybrid_frame.flow_time) / 4;
+
+    sharkoon_hybrid_frame.sparkle_time =
+        (uint8_t)sharkoon_hybrid_frame.flow_time;
+
+    /*
+     * =========================================================
+     * LOW-BRIGHTNESS / GLOBAL BRIGHTNESS STATE
+     * =========================================================
+     */
+    sharkoon_hybrid_frame.minimum_hue = 40;
+
+    if (global_value < 80) {
+        sharkoon_hybrid_frame.minimum_hue =
+            40 +
+            scale8(
+                80 - global_value,
+                64
+            );
+    }
+
+    sharkoon_hybrid_frame.effective_value =
+        scale8(
+            global_value,
+            64 + scale8(global_value, 191)
+        );
+
+    /*
+     * =========================================================
+     * REACTIVE STATE
+     * =========================================================
+     *
+     * Nur Hits mit tatsächlich noch sichtbarer Amplitude werden in den
+     * Frame-Snapshot übernommen. Reihenfolge und Berechnung bleiben identisch.
+     */
+    const uint8_t source_hit_count =
+        g_last_hit_tracker.count < LED_HITS_TO_REMEMBER
+            ? g_last_hit_tracker.count
+            : LED_HITS_TO_REMEMBER;
+
+    sharkoon_hybrid_frame.hit_count = 0;
+
+    for (uint8_t j = 0; j < source_hit_count; ++j) {
+        const uint16_t tick =
+            scale16by8(
+                g_last_hit_tracker.tick[j],
+                1 + speed / 4
+            );
+
+        uint8_t amplitude = 0;
+
+        if (tick <= 255) {
+            const uint8_t t = (uint8_t)tick;
+
+            if (t <= 55) {
+                amplitude =
+                    (t < 32)
+                        ? (4 + 8 * t)
+                        : 255;
+            } else {
+                const uint8_t decay =
+                    (
+                        ((uint16_t)(255 - t)) *
+                        UINT16_C(164)
+                    ) >> 7;
+
+                amplitude =
+                    scale8(
+                        decay,
+                        decay
+                    );
+            }
+        }
+
+        if (amplitude == 0) {
+            continue;
+        }
+
+        const uint8_t dst = sharkoon_hybrid_frame.hit_count++;
+
+        sharkoon_hybrid_frame.hit_x[dst]         = g_last_hit_tracker.x[j];
+        sharkoon_hybrid_frame.hit_y[dst]         = g_last_hit_tracker.y[j];
+        sharkoon_hybrid_frame.hit_amplitude[dst] = amplitude;
+    }
+}
 
 /*
  * =============================================================
@@ -162,13 +338,21 @@ static rgb_t sharkoon_mix_white(
 static bool VIALRGB_DIRECT(effect_params_t *params) {
     RGB_MATRIX_USE_LIMITS(led_min, led_max);
 
+    if (params->iter == 0 || !sharkoon_hybrid_frame_ready) {
+        sharkoon_prepare_hybrid_frame();
+        sharkoon_hybrid_frame_ready = true;
+    }
+
     /*
      * =========================================================
      * REAL DIRECT RGB
      * =========================================================
+     *
+     * Direct/Hybrid wird einmal pro vollständigem Frame entschieden. Dadurch
+     * kann ein 250-ms-Timeout nicht mehr mitten zwischen zwei LED-Chunks einen
+     * halben Direct-/halben Hybrid-Frame erzeugen.
      */
-
-    if (sharkoon_direct_stream_active()) {
+    if (sharkoon_hybrid_frame.direct_stream_active) {
         for (uint8_t i = led_min; i < led_max; ++i) {
             const rgb_t rgb =
                 rgb_matrix_hsv_to_rgb(
@@ -186,131 +370,36 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
         return rgb_matrix_check_finished_leds(led_max);
     }
 
+    const uint16_t flow_time         = sharkoon_hybrid_frame.flow_time;
+    const int8_t   rot_c             = sharkoon_hybrid_frame.rot_c;
+    const int8_t   rot_s             = sharkoon_hybrid_frame.rot_s;
+    const uint8_t  omega             = sharkoon_hybrid_frame.omega;
+    const uint8_t  sparkle_time      = sharkoon_hybrid_frame.sparkle_time;
+    const uint8_t  minimum_hue       = sharkoon_hybrid_frame.minimum_hue;
+    const uint8_t  effective_value   = sharkoon_hybrid_frame.effective_value;
+    const uint8_t  hit_count         = sharkoon_hybrid_frame.hit_count;
 
     /*
-     * =========================================================
-     * HYBRID STATE
-     * =========================================================
+     * Genau wie vorher pro Render-Chunk neu starten, damit die Sparkle-Sequenz
+     * pro LED unverändert bleibt.
      */
-
-    const uint16_t *palette =
-        palettefx_get_palette_data();
-
-    /*
-     * Globale Helligkeit.
-     *
-     * WICHTIG:
-     * Bis zum endgültigen RGB-Output wird dieser Wert
-     * überhaupt nicht angewendet.
-     */
-    const uint8_t global_value =
-        rgb_matrix_config.hsv.v;
-
-
-    /*
-     * =========================================================
-     * FLOW STATE
-     * =========================================================
-     */
-
-    const uint16_t flow_time =
-        palettefx_scaled_time(
-            g_rgb_timer,
-            1 + rgb_matrix_config.speed / 8
-        );
-
-    const int8_t rot_c =
-        cos8(flow_time / 4) - 128;
-
-    const int8_t rot_s =
-        sin8(flow_time / 4) - 128;
-
-    const uint8_t omega =
-        32 + sin8(flow_time) / 4;
-
-
-    /*
-     * =========================================================
-     * SPARKLE STATE
-     * =========================================================
-     */
-
-    const uint8_t sparkle_time =
-        (uint8_t)flow_time;
-
-    uint16_t rand_state =
-        1 + params->iter;
-
-
-    /*
-     * =========================================================
-     * REACTIVE STATE
-     * =========================================================
-     */
-
-    const uint8_t hit_count =
-        g_last_hit_tracker.count;
-
-    uint8_t hit_amplitude[LED_HITS_TO_REMEMBER] = {0};
-
-    /*
-     * Exakt die Attack/Decay-Grundidee des
-     * originalen PaletteFx Reactive.
-     */
-    for (uint8_t j = 0; j < hit_count; ++j) {
-        const uint16_t tick =
-            scale16by8(
-                g_last_hit_tracker.tick[j],
-                1 + rgb_matrix_config.speed / 4
-            );
-
-        if (tick <= 255) {
-            const uint8_t t =
-                (uint8_t)tick;
-
-            if (t <= 55) {
-                hit_amplitude[j] =
-                    (t < 32)
-                        ? (4 + 8 * t)
-                        : 255;
-            } else {
-                const uint8_t decay =
-                    (
-                        ((uint16_t)(255 - t)) *
-                        UINT16_C(164)
-                    ) >> 7;
-
-                hit_amplitude[j] =
-                    scale8(
-                        decay,
-                        decay
-                    );
-            }
-        }
-    }
-
+    uint16_t rand_state = 1 + params->iter;
 
     /*
      * =========================================================
      * RENDER LEDs
      * =========================================================
      */
-
     for (uint8_t i = led_min; i < led_max; ++i) {
         RGB_MATRIX_TEST_LED_FLAGS();
-
 
         /*
          * =====================================================
          * 1. FLOW
          * =====================================================
          */
-
-        const uint8_t x =
-            g_led_config.point[i].x;
-
-        const uint8_t y =
-            g_led_config.point[i].y;
+        const uint8_t x = g_led_config.point[i].x;
+        const uint8_t y = g_led_config.point[i].y;
 
         const uint8_t x1 =
             (uint8_t)(
@@ -348,7 +437,6 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
                     : (255 - flow_value)
             );
 
-
         /*
          * Rohe Phosphor-Farbe.
          *
@@ -356,9 +444,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          */
         hsv_t hsv =
             sharkoon_palette_interp_raw(
-                palette,
+                sharkoon_hybrid_frame.palette,
                 flow_value
             );
+
         /*
          * Sehr helle Stellen des Flow-Ribbons leicht komprimieren.
          *
@@ -375,76 +464,31 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
         }
 
         /*
-         * =====================================================
          * LOW-BRIGHTNESS PHOSPHOR CORRECTION
-         * =====================================================
          *
-         * Phosphor endet bei Hue ~40.
-         *
-         * Bei geringer Helligkeit sieht genau dieser warme
-         * Gelbton auf deiner Hardware offenbar rötlich aus.
-         *
-         * Deshalb wird NUR bei geringer Gesamt-Helligkeit
-         * der wärmste Bereich minimal Richtung Grün verschoben.
-         *
-         * Hohe Helligkeit:
-         *     Palette bleibt komplett original.
-         *
-         * Niedrige Helligkeit:
-         *     unterste Hue wandert ungefähr 40 -> 53..60.
+         * minimum_hue wurde einmal pro Frame aus global_value berechnet.
          */
-
-        uint8_t minimum_hue = 40;
-
-        if (global_value < 80) {
-            minimum_hue =
-                40 +
-                scale8(
-                    80 - global_value,
-                    64
-                );
-        }
-
         if (hsv.h < minimum_hue) {
-            hsv.h =
-                minimum_hue;
+            hsv.h = minimum_hue;
         }
-
 
         /*
-         * Normale RGB-Matrix-Sättigung weiterhin respektieren.
+         * Die Saturation der Palette gehoert zum Effekt selbst.
+         * VIAL/VIA-Saturation wird hier bewusst NICHT angewendet:
+         * Der Color-Picker darf die Phosphor-Palette nicht Richtung Weiss
+         * auswaschen. Globale Helligkeit und Speed bleiben weiterhin aktiv.
          */
-        hsv.s =
-            scale8(
-                hsv.s,
-                rgb_matrix_config.hsv.s
-            );
-
 
         /*
          * Vorerst volle interne RGB-Farbe.
          */
-        rgb_t rgb =
-            rgb_matrix_hsv_to_rgb(hsv);
-
+        rgb_t rgb = rgb_matrix_hsv_to_rgb(hsv);
 
         /*
          * =====================================================
          * 2. SPARKLE
          * =====================================================
-         *
-         * Diesmal KEIN PaletteFx-Palettenversatz.
-         *
-         * Stattdessen entstehen echte kurze Lichtblitze:
-         *
-         *       aktuelle Flow-Farbe
-         *               ↓
-         *           Richtung Weiß
-         *
-         * Nur das obere Viertel der Sinuswelle erzeugt
-         * überhaupt einen Sparkle.
          */
-
         rand_state *= UINT16_C(36563);
 
         const uint8_t sparkle_phase =
@@ -458,204 +502,140 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
                 sparkle_phase
             );
 
-        uint8_t sparkle_strength = 0;
-
         if (sparkle_wave > 192) {
-            /*
-             * 193..255
-             * wird ungefähr
-             * 4..252.
-             */
-            sparkle_strength =
+            const uint8_t sparkle_strength =
                 (sparkle_wave - 192) << 2;
+
+            const uint8_t sparkle_white =
+                scale8(
+                    sparkle_strength,
+                    90
+                );
+
+            rgb =
+                sharkoon_mix_white(
+                    rgb,
+                    sparkle_white
+                );
         }
-
-
-        /*
-         * Maximal ungefähr 35 % Richtung Weiß.
-         *
-         * Das sollte klar sichtbar schimmern/blitzen,
-         * aber nicht das komplette Flow-Bild zerstören.
-         */
-        const uint8_t sparkle_white =
-            scale8(
-                sparkle_strength,
-                90
-            );
-
-        rgb =
-            sharkoon_mix_white(
-                rgb,
-                sparkle_white
-            );
-
 
         /*
          * =====================================================
          * 3. REACTIVE
          * =====================================================
          */
-
         uint8_t reactive_value = 0;
 
         for (uint8_t j = 0; j < hit_count; ++j) {
-            if (hit_amplitude[j] == 0) {
+            /*
+             * Die alte Rechnung war:
+             *
+             *   abs8((x - hit_x) / 2)
+             *
+             * Für diesen Wertebereich ist das exakt gleich zu
+             * abs(x-hit_x) >> 1, benötigt aber keine signed Division.
+             * Die Vorprüfung auf < 32 entspricht exakt dx/dy < 16.
+             */
+            const uint8_t raw_dx =
+                x >= sharkoon_hybrid_frame.hit_x[j]
+                    ? x - sharkoon_hybrid_frame.hit_x[j]
+                    : sharkoon_hybrid_frame.hit_x[j] - x;
+
+            if (raw_dx >= SHARKOON_REACTIVE_DIAMETER) {
                 continue;
             }
 
-            const uint8_t dx =
-                abs8(
-                    (
-                        g_led_config.point[i].x -
-                        g_last_hit_tracker.x[j]
-                    ) / 2
-                );
+            const uint8_t raw_dy =
+                y >= sharkoon_hybrid_frame.hit_y[j]
+                    ? y - sharkoon_hybrid_frame.hit_y[j]
+                    : sharkoon_hybrid_frame.hit_y[j] - y;
 
-            const uint8_t dy =
-                abs8(
-                    (
-                        g_led_config.point[i].y -
-                        g_last_hit_tracker.y[j]
-                    ) / 2
-                );
+            if (raw_dy >= SHARKOON_REACTIVE_DIAMETER) {
+                continue;
+            }
 
-            /*
-         * Kleinerer Reactive-Radius.
-         *
-         * Vorher: 21
-         * Jetzt:  16
-         */
-        if (dx < 16 && dy < 16) {
+            const uint8_t dx = raw_dx >> 1;
+            const uint8_t dy = raw_dy >> 1;
+
             const uint16_t dist_sqr =
                 dx * dx +
                 dy * dy;
 
-            if (dist_sqr < 16 * 16) {
-                const uint8_t dist =
-                    sqrt16(
-                        dist_sqr
-                    );
+            if (dist_sqr >= SHARKOON_REACTIVE_RADIUS * SHARKOON_REACTIVE_RADIUS) {
+                continue;
+            }
 
-                /*
-                 * Linearer Abstand:
-                 *
-                 * Mitte -> 255
-                 * Rand  -> 0
-                 */
-                const uint8_t distance_falloff =
-                    255 -
-                    (
-                        ((uint16_t)dist * 255) /
-                        16
-                    );
+            const uint8_t feathered_falloff =
+                pgm_read_byte(
+                    &sharkoon_reactive_falloff[dist_sqr]
+                );
 
-                /*
-                 * Quadratisches Falloff.
-                 *
-                 * Dadurch bleibt der Kern deutlich sichtbar,
-                 * aber der äußere Bereich wird sehr viel sanfter.
-                 */
-                const uint8_t feathered_falloff =
+            reactive_value =
+                qadd8(
+                    reactive_value,
                     scale8(
-                        distance_falloff,
-                        distance_falloff
-                    );
+                        feathered_falloff,
+                        sharkoon_hybrid_frame.hit_amplitude[j]
+                    )
+                );
 
-                reactive_value =
-                    qadd8(
-                        reactive_value,
-                        scale8(
-                            feathered_falloff,
-                            hit_amplitude[j]
-                        )
-                    );
-
-                if (reactive_value == 255) {
-                    break;
-                }
+            if (reactive_value == 255) {
+                break;
             }
         }
+
+        if (reactive_value != 0) {
+            const uint8_t reactive_white =
+                scale8(
+                    reactive_value,
+                    160
+                );
+
+            rgb =
+                sharkoon_mix_white(
+                    rgb,
+                    reactive_white
+                );
         }
-
-
-        /*
-         * Reactive ist absichtlich deutlich stärker
-         * als Sparkle.
-         *
-         * Maximal ungefähr 63 % Mischung Richtung Weiß.
-         *
-         * Das bedeutet gleichzeitig:
-         *
-         * - sichtbar heller
-         * - sichtbar weniger gesättigt
-         * - KEINE Änderung des Flow-Farbtons
-         */
-        const uint8_t reactive_white =
-            scale8(
-                reactive_value,
-                160
-            );
-
-        rgb =
-            sharkoon_mix_white(
-                rgb,
-                reactive_white
-            );
-
 
         /*
          * =====================================================
          * 4. GLOBAL BRIGHTNESS
          * =====================================================
          *
-         * Erst JETZT wird RM_VALU / RM_VALD angewendet.
-         *
-         * Und zwar auf:
-         *
-         * Flow
-         * + Sparkle
-         * + Reactive
-         *
-         * exakt gleich.
+         * effective_value wurde einmal pro Frame berechnet. Nur bei
+         * FASTLED_SCALE8_FIXED == 1 ist scale8(channel, 255) exakt die
+         * Identitaet; dann koennen wir diesen Sonderfall komplett sparen.
          */
+#if FASTLED_SCALE8_FIXED == 1
+        if (effective_value != 255) {
+#endif
+            rgb.r =
+                scale8(
+                    rgb.r,
+                    effective_value
+                );
 
-        /*
-         * Brightness curve
-         *
-         * Maximale Helligkeit bleibt identisch.
-         * Niedrige Stufen werden deutlich weiter heruntergeregelt.
-         */
-        const uint8_t effective_value =
-            scale8(
-                global_value,
-                64 + scale8(global_value, 191)
-            );
+            rgb.g =
+                scale8(
+                    rgb.g,
+                    effective_value
+                );
 
-        rgb.r =
-            scale8(
-                rgb.r,
-                effective_value
-            );
-
-        rgb.g =
-            scale8(
-                rgb.g,
-                effective_value
-            );
-
-        rgb.b =
-            scale8(
-                rgb.b,
-                effective_value
-            );
-
+            rgb.b =
+                scale8(
+                    rgb.b,
+                    effective_value
+                );
+#if FASTLED_SCALE8_FIXED == 1
+        }
+#endif
 
         /*
          * =====================================================
          * OUTPUT
          * =====================================================
          */
-
         rgb_matrix_set_color(
             i,
             rgb.r,

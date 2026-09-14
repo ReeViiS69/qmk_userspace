@@ -602,6 +602,14 @@ static void sharkoon_consume_active_oneshot_layer(void) {
     reset_oneshot_layer();
 }
 
+#ifdef RGB_MATRIX_ENABLE
+bool pre_process_record_user(uint16_t keycode, keyrecord_t *record) {
+    (void)keycode;
+    sharkoon_solid_reactive_process_key_event(record);
+    return true;
+}
+#endif
+
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     const uint8_t row = record->event.key.row;
     const uint8_t col = record->event.key.col;
@@ -763,28 +771,32 @@ bool rgb_matrix_indicators_user(void) {
         sharkoon_macro_blink_on    = !sharkoon_macro_blink_on;
     }
 
+    // OFF frames need no HSV -> RGB conversion at all.
+    if (!sharkoon_macro_blink_on) {
+        if (sharkoon_recording) {
+            if (sharkoon_recording_led != NO_LED) {
+                rgb_matrix_set_color(sharkoon_recording_led, 0, 0, 0);
+            }
+        } else {
+            sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
+        }
+        return true;
+    }
+
     const rgb_t status_rgb = hsv_to_rgb(rgb_matrix_config.hsv);
 
     // Recording has priority over selection and uses only the physical key that
     // actually started the recording.
     if (sharkoon_recording) {
         if (sharkoon_recording_led != NO_LED) {
-            if (sharkoon_macro_blink_on) {
-                rgb_matrix_set_color(sharkoon_recording_led, status_rgb.r, status_rgb.g, status_rgb.b);
-            } else {
-                rgb_matrix_set_color(sharkoon_recording_led, 0, 0, 0);
-            }
+            rgb_matrix_set_color(sharkoon_recording_led, status_rgb.r, status_rgb.g, status_rgb.b);
         }
         return true;
     }
 
     // The active layer view was already fully resolved when the keymap cache was
     // rebuilt. RGB frames only render the cached LED bitset; no keymap scan occurs.
-    if (sharkoon_macro_blink_on) {
-        sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, status_rgb.r, status_rgb.g, status_rgb.b);
-    } else {
-        sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
-    }
+    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, status_rgb.r, status_rgb.g, status_rgb.b);
 
     return true;
 }
