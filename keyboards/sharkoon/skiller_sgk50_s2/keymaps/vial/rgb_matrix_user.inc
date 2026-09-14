@@ -1,5 +1,40 @@
 RGB_MATRIX_EFFECT(VIALRGB_DIRECT)
 
+#ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
+#    ifdef SHARKOON_PERF_BENCHMARK
+#        include "sharkoon_sgk50_s2.h"
+
+/* Cortex-M3 DWT cycle counter, used only by the temporary benchmark build. */
+#        define SHARKOON_DWT_CYCCNT (*(volatile uint32_t *)UINT32_C(0xE0001004))
+
+static sharkoon_perf_rgb_stats_t sharkoon_perf_rgb_stats;
+
+static inline uint32_t sharkoon_perf_cycle_now(void) {
+    return SHARKOON_DWT_CYCCNT;
+}
+
+static inline void sharkoon_perf_accumulate(uint32_t *sum, uint32_t *max_value, uint32_t *count, uint32_t cycles) {
+    *sum += cycles;
+    if (cycles > *max_value) {
+        *max_value = cycles;
+    }
+    ++(*count);
+}
+
+static inline void sharkoon_perf_accumulate_sample(uint32_t *sum, uint32_t *max_value, uint32_t cycles) {
+    *sum += cycles;
+    if (cycles > *max_value) {
+        *max_value = cycles;
+    }
+}
+
+void sharkoon_perf_rgb_take_snapshot(sharkoon_perf_rgb_stats_t *out) {
+    *out = sharkoon_perf_rgb_stats;
+    sharkoon_perf_rgb_stats = (sharkoon_perf_rgb_stats_t){0};
+}
+#    endif
+#endif
+
 #include "sharkoon_solid_reactive.inc"
 #include "sharkoon_palettefx.inc"
 
@@ -17,11 +52,11 @@ bool sharkoon_direct_stream_active(void);
 #    error "SHARKOON HYBRID requires RGB_MATRIX_KEYREACTIVE_ENABLED"
 #endif
 
+#include "sharkoon_hybrid_luts.inc"
+
 #define SHARKOON_PALETTE_COLOR_COUNT 16u
 #define SHARKOON_FLOW_COLOR_COUNT    128u
 #define SHARKOON_DIRECT_DIRTY_WORDS  ((RGB_MATRIX_LED_COUNT + 31u) / 32u)
-#define SHARKOON_REACTIVE_RADIUS     16u
-#define SHARKOON_REACTIVE_DIAMETER   (SHARKOON_REACTIVE_RADIUS * 2u)
 
 /*
  * =============================================================
@@ -88,6 +123,9 @@ void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length) {
 
 static inline rgb_t sharkoon_direct_get_rgb(uint8_t led) {
     if (sharkoon_direct_is_dirty(led)) {
+#ifdef SHARKOON_PERF_BENCHMARK
+        ++sharkoon_perf_rgb_stats.direct_cache_misses;
+#endif
         sharkoon_direct_rgb_cache[led] =
             rgb_matrix_hsv_to_rgb(
                 g_direct_mode_colors[led]
@@ -276,42 +314,6 @@ static inline rgb_t sharkoon_mix_white(rgb_t rgb, uint8_t amount) {
 }
 
 /*
- * Exakte Lookup-Tabelle für den bisherigen Reactive-Falloff:
- *
- *   dist = sqrt16(dist_sqr)
- *   distance_falloff = 255 - (dist * 255) / 16
- *   feathered_falloff = scale8(distance_falloff, distance_falloff)
- *
- * dist_sqr ist nach der Radiusprüfung immer 0..255. Damit können sqrt16(),
- * die 16-Bit-Division und das abschließende scale8() vollständig aus dem
- * LED-x-Hit-Hotpath verschwinden. Der Wert an Index 0 berücksichtigt beide
- * möglichen QMK/FastLED-scale8-Semantiken; alle übrigen 255 Werte sind gleich.
- */
-static const uint8_t PROGMEM sharkoon_reactive_falloff[256] = {
-#if FASTLED_SCALE8_FIXED == 1
-    255,
-#else
-    254,
-#endif
-    225, 225, 225, 196, 196, 196, 196, 196, 169, 169, 169, 169, 169, 169, 169,
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 121, 121, 121, 121, 121, 121, 121,
-    121, 121, 121, 121, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
-    100,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,  81,
-     64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,
-     64,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,  49,
-     49,  49,  49,  49,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,  36,
-     36,  36,  36,  36,  36,  36,  36,  36,  36,  25,  25,  25,  25,  25,  25,  25,
-     25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,  25,
-     16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,
-     16,  16,  16,  16,  16,  16,  16,  16,  16,   9,   9,   9,   9,   9,   9,   9,
-      9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,   9,
-      9,   9,   9,   9,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,
-      4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,
-      4,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-};
-
-/*
  * Alles, was innerhalb eines vollständigen RGB-Frames konstant bleibt, wird
  * einmal bei params->iter == 0 vorbereitet. QMK kann denselben Frame über
  * mehrere RGB_MATRIX_LED_PROCESS_LIMIT-Chunks verteilen; diese Chunks lesen
@@ -326,9 +328,8 @@ typedef struct {
     uint8_t sparkle_time;
     uint8_t effective_value;
     uint8_t hit_count;
-    uint8_t hit_x[LED_HITS_TO_REMEMBER];
-    uint8_t hit_y[LED_HITS_TO_REMEMBER];
-    uint8_t hit_amplitude[LED_HITS_TO_REMEMBER];
+    const uint8_t *hit_falloff[LED_HITS_TO_REMEMBER];
+    uint8_t        hit_amplitude[LED_HITS_TO_REMEMBER];
 } sharkoon_hybrid_frame_t;
 
 static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
@@ -450,8 +451,8 @@ static void sharkoon_prepare_hybrid_frame(void) {
 
         const uint8_t dst = sharkoon_hybrid_frame.hit_count++;
 
-        sharkoon_hybrid_frame.hit_x[dst]         = g_last_hit_tracker.x[j];
-        sharkoon_hybrid_frame.hit_y[dst]         = g_last_hit_tracker.y[j];
+        sharkoon_hybrid_frame.hit_falloff[dst] =
+            sharkoon_reactive_spatial_lut[g_last_hit_tracker.index[j]];
         sharkoon_hybrid_frame.hit_amplitude[dst] = amplitude;
     }
 }
@@ -465,8 +466,32 @@ static void sharkoon_prepare_hybrid_frame(void) {
 static bool VIALRGB_DIRECT(effect_params_t *params) {
     RGB_MATRIX_USE_LIMITS(led_min, led_max);
 
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_chunk_start = sharkoon_perf_cycle_now();
+#endif
+
     if (params->iter == 0 || !sharkoon_hybrid_frame_ready) {
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_prepare_start = sharkoon_perf_cycle_now();
+#endif
         sharkoon_prepare_hybrid_frame();
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_prepare_cycles = sharkoon_perf_cycle_now() - perf_prepare_start;
+        sharkoon_perf_accumulate(
+            &sharkoon_perf_rgb_stats.hybrid_prepare_sum,
+            &sharkoon_perf_rgb_stats.hybrid_prepare_max,
+            &sharkoon_perf_rgb_stats.hybrid_prepare_count,
+            perf_prepare_cycles
+        );
+
+        if (!sharkoon_hybrid_frame.direct_stream_active) {
+            ++sharkoon_perf_rgb_stats.hybrid_frame_count;
+            sharkoon_perf_rgb_stats.active_hit_sum += sharkoon_hybrid_frame.hit_count;
+            if (sharkoon_hybrid_frame.hit_count > sharkoon_perf_rgb_stats.active_hit_max) {
+                sharkoon_perf_rgb_stats.active_hit_max = sharkoon_hybrid_frame.hit_count;
+            }
+        }
+#endif
         sharkoon_hybrid_frame_ready = true;
     }
 
@@ -491,6 +516,15 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
             );
         }
 
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_direct_cycles = sharkoon_perf_cycle_now() - perf_chunk_start;
+        sharkoon_perf_accumulate(
+            &sharkoon_perf_rgb_stats.direct_chunk_sum,
+            &sharkoon_perf_rgb_stats.direct_chunk_max,
+            &sharkoon_perf_rgb_stats.direct_chunk_count,
+            perf_direct_cycles
+        );
+#endif
         return rgb_matrix_check_finished_leds(led_max);
     }
 
@@ -515,6 +549,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
      */
     for (uint8_t i = led_min; i < led_max; ++i) {
         RGB_MATRIX_TEST_LED_FLAGS();
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t0 = sharkoon_perf_cycle_now();
+#endif
 
         /*
          * =====================================================
@@ -544,8 +582,8 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
 
         uint8_t flow_value =
             scale8(
-                sin8(
-                    x1 - 2 * flow_time
+                pgm_read_byte(
+                    &sharkoon_sin8_lut[(uint8_t)(x1 - 2 * flow_time)]
                 ),
                 omega
             ) +
@@ -570,6 +608,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          */
         rgb_t rgb = sharkoon_flow_rgb_cache[flow_value >> 1];
 
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t1 = sharkoon_perf_cycle_now();
+#endif
+
         /*
          * =====================================================
          * 2. SPARKLE
@@ -582,28 +624,22 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
                 rand_state >> 8
             );
 
-        const uint8_t sparkle_wave =
-            sin8(
-                2 * sparkle_time +
-                sparkle_phase
+        const uint8_t sparkle_white =
+            pgm_read_byte(
+                &sharkoon_sparkle_white_lut[(uint8_t)(2 * sparkle_time + sparkle_phase)]
             );
 
-        if (sparkle_wave > 192) {
-            const uint8_t sparkle_strength =
-                (sparkle_wave - 192) << 2;
-
-            const uint8_t sparkle_white =
-                scale8(
-                    sparkle_strength,
-                    90
-                );
-
+        if (sparkle_white != 0) {
             rgb =
                 sharkoon_mix_white(
                     rgb,
                     sparkle_white
                 );
         }
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t2 = sharkoon_perf_cycle_now();
+#endif
 
         /*
          * =====================================================
@@ -613,48 +649,14 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
         uint8_t reactive_value = 0;
 
         for (uint8_t j = 0; j < hit_count; ++j) {
-            /*
-             * Die alte Rechnung war:
-             *
-             *   abs8((x - hit_x) / 2)
-             *
-             * Für diesen Wertebereich ist das exakt gleich zu
-             * abs(x-hit_x) >> 1, benötigt aber keine signed Division.
-             * Die Vorprüfung auf < 32 entspricht exakt dx/dy < 16.
-             */
-            const uint8_t raw_dx =
-                x >= sharkoon_hybrid_frame.hit_x[j]
-                    ? x - sharkoon_hybrid_frame.hit_x[j]
-                    : sharkoon_hybrid_frame.hit_x[j] - x;
-
-            if (raw_dx >= SHARKOON_REACTIVE_DIAMETER) {
-                continue;
-            }
-
-            const uint8_t raw_dy =
-                y >= sharkoon_hybrid_frame.hit_y[j]
-                    ? y - sharkoon_hybrid_frame.hit_y[j]
-                    : sharkoon_hybrid_frame.hit_y[j] - y;
-
-            if (raw_dy >= SHARKOON_REACTIVE_DIAMETER) {
-                continue;
-            }
-
-            const uint8_t dx = raw_dx >> 1;
-            const uint8_t dy = raw_dy >> 1;
-
-            const uint16_t dist_sqr =
-                dx * dx +
-                dy * dy;
-
-            if (dist_sqr >= SHARKOON_REACTIVE_RADIUS * SHARKOON_REACTIVE_RADIUS) {
-                continue;
-            }
-
             const uint8_t feathered_falloff =
                 pgm_read_byte(
-                    &sharkoon_reactive_falloff[dist_sqr]
+                    &sharkoon_hybrid_frame.hit_falloff[j][i]
                 );
+
+            if (feathered_falloff == 0) {
+                continue;
+            }
 
             reactive_value =
                 qadd8(
@@ -683,6 +685,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
                     reactive_white
                 );
         }
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t3 = sharkoon_perf_cycle_now();
+#endif
 
         /*
          * =====================================================
@@ -717,6 +723,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
         }
 #endif
 
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t4 = sharkoon_perf_cycle_now();
+#endif
+
         /*
          * =====================================================
          * OUTPUT
@@ -728,7 +738,28 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
             rgb.g,
             rgb.b
         );
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        const uint32_t perf_t5 = sharkoon_perf_cycle_now();
+
+        sharkoon_perf_accumulate_sample(&sharkoon_perf_rgb_stats.flow_sum,       &sharkoon_perf_rgb_stats.flow_max,       perf_t1 - perf_t0);
+        sharkoon_perf_accumulate_sample(&sharkoon_perf_rgb_stats.sparkle_sum,    &sharkoon_perf_rgb_stats.sparkle_max,    perf_t2 - perf_t1);
+        sharkoon_perf_accumulate_sample(&sharkoon_perf_rgb_stats.reactive_sum,   &sharkoon_perf_rgb_stats.reactive_max,   perf_t3 - perf_t2);
+        sharkoon_perf_accumulate_sample(&sharkoon_perf_rgb_stats.brightness_sum, &sharkoon_perf_rgb_stats.brightness_max, perf_t4 - perf_t3);
+        sharkoon_perf_accumulate_sample(&sharkoon_perf_rgb_stats.output_sum,     &sharkoon_perf_rgb_stats.output_max,     perf_t5 - perf_t4);
+        ++sharkoon_perf_rgb_stats.led_samples;
+#endif
     }
+
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_hybrid_cycles = sharkoon_perf_cycle_now() - perf_chunk_start;
+    sharkoon_perf_accumulate(
+        &sharkoon_perf_rgb_stats.hybrid_chunk_sum,
+        &sharkoon_perf_rgb_stats.hybrid_chunk_max,
+        &sharkoon_perf_rgb_stats.hybrid_chunk_count,
+        perf_hybrid_cycles
+    );
+#endif
 
     return rgb_matrix_check_finished_leds(led_max);
 }

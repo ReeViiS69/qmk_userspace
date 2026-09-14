@@ -1,5 +1,5 @@
 #pragma once
-
+#define DEBUG_MATRIX_SCAN_RATE
 /*
  * Storage layout for this confirmed SGK50 S2 hardware:
  * - WB32FQ95xC: 256 KiB internal flash / 36 KiB SRAM

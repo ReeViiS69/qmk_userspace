@@ -10,6 +10,13 @@
 #include "send_string_keycodes.h"
 #include "timer.h"
 
+#ifdef SHARKOON_PERF_BENCHMARK
+#    ifndef CONSOLE_ENABLE
+#        error "SHARKOON_PERF_BENCHMARK requires CONSOLE_ENABLE = yes"
+#    endif
+#    include "print.h"
+#endif
+
 #include <stdint.h>
 #include <string.h>
 
@@ -310,8 +317,110 @@ bool via_command_kb(uint8_t *data, uint8_t length) {
 }
 #endif
 
+#ifdef SHARKOON_PERF_BENCHMARK
+/*
+ * Cortex-M3 debug/trace registers. The WB32FQ95 contains the architectural
+ * DWT cycle counter, which gives us exact on-device CPU-cycle timing without
+ * routing the measured code through USB logging.
+ */
+#    define SHARKOON_DEMCR      (*(volatile uint32_t *)UINT32_C(0xE000EDFC))
+#    define SHARKOON_DWT_CTRL   (*(volatile uint32_t *)UINT32_C(0xE0001000))
+#    define SHARKOON_DWT_CYCCNT (*(volatile uint32_t *)UINT32_C(0xE0001004))
+#    define SHARKOON_DEMCR_TRCENA UINT32_C(0x01000000)
+#    define SHARKOON_DWT_CYCCNTENA UINT32_C(0x00000001)
+#    define SHARKOON_PERF_REPORT_SCANS 2048u
+
+static void sharkoon_perf_enable_dwt(void) {
+    SHARKOON_DEMCR |= SHARKOON_DEMCR_TRCENA;
+    SHARKOON_DWT_CYCCNT = 0;
+    SHARKOON_DWT_CTRL |= SHARKOON_DWT_CYCCNTENA;
+}
+
+static inline uint32_t sharkoon_perf_average(uint32_t sum, uint32_t count) {
+    return count != 0 ? sum / count : 0;
+}
+
+void matrix_scan_user(void) {
+    static uint32_t previous_cycle;
+    static uint32_t scan_gap_sum;
+    static uint32_t scan_gap_max;
+    static uint16_t scan_gap_count;
+
+    const uint32_t now = SHARKOON_DWT_CYCCNT;
+
+    if (previous_cycle != 0) {
+        const uint32_t gap = now - previous_cycle;
+        scan_gap_sum += gap;
+        if (gap > scan_gap_max) {
+            scan_gap_max = gap;
+        }
+        ++scan_gap_count;
+    }
+
+    previous_cycle = now;
+
+    if (scan_gap_count < SHARKOON_PERF_REPORT_SCANS) {
+        return;
+    }
+
+    sharkoon_perf_rgb_stats_t rgb;
+    sharkoon_perf_rgb_take_snapshot(&rgb);
+
+    uprintf(
+        "PERF scan cyc avg/max=%lu/%lu n=%u\r\n",
+        (unsigned long)sharkoon_perf_average(scan_gap_sum, scan_gap_count),
+        (unsigned long)scan_gap_max,
+        scan_gap_count
+    );
+
+    uprintf(
+        "PERF chunks cyc solid=%lu/%lu n=%lu direct=%lu/%lu n=%lu hybrid=%lu/%lu n=%lu prep=%lu/%lu n=%lu misses=%lu\r\n",
+        (unsigned long)sharkoon_perf_average(rgb.solid_chunk_sum, rgb.solid_chunk_count),
+        (unsigned long)rgb.solid_chunk_max,
+        (unsigned long)rgb.solid_chunk_count,
+        (unsigned long)sharkoon_perf_average(rgb.direct_chunk_sum, rgb.direct_chunk_count),
+        (unsigned long)rgb.direct_chunk_max,
+        (unsigned long)rgb.direct_chunk_count,
+        (unsigned long)sharkoon_perf_average(rgb.hybrid_chunk_sum, rgb.hybrid_chunk_count),
+        (unsigned long)rgb.hybrid_chunk_max,
+        (unsigned long)rgb.hybrid_chunk_count,
+        (unsigned long)sharkoon_perf_average(rgb.hybrid_prepare_sum, rgb.hybrid_prepare_count),
+        (unsigned long)rgb.hybrid_prepare_max,
+        (unsigned long)rgb.hybrid_prepare_count,
+        (unsigned long)rgb.direct_cache_misses
+    );
+
+    uprintf(
+        "PERF hybrid-led cyc flow=%lu/%lu sparkle=%lu/%lu reactive=%lu/%lu bright=%lu/%lu out=%lu/%lu samples=%lu hits/frame=%lu max=%lu\r\n",
+        (unsigned long)sharkoon_perf_average(rgb.flow_sum, rgb.led_samples),
+        (unsigned long)rgb.flow_max,
+        (unsigned long)sharkoon_perf_average(rgb.sparkle_sum, rgb.led_samples),
+        (unsigned long)rgb.sparkle_max,
+        (unsigned long)sharkoon_perf_average(rgb.reactive_sum, rgb.led_samples),
+        (unsigned long)rgb.reactive_max,
+        (unsigned long)sharkoon_perf_average(rgb.brightness_sum, rgb.led_samples),
+        (unsigned long)rgb.brightness_max,
+        (unsigned long)sharkoon_perf_average(rgb.output_sum, rgb.led_samples),
+        (unsigned long)rgb.output_max,
+        (unsigned long)rgb.led_samples,
+        (unsigned long)sharkoon_perf_average(rgb.active_hit_sum, rgb.hybrid_frame_count),
+        (unsigned long)rgb.active_hit_max
+    );
+
+    scan_gap_sum   = 0;
+    scan_gap_max   = 0;
+    scan_gap_count = 0;
+
+    /* Console output itself must not become the next measured scan gap. */
+    previous_cycle = SHARKOON_DWT_CYCCNT;
+}
+#endif
+
 #ifdef RGB_MATRIX_ENABLE
 void keyboard_post_init_user(void) {
+#ifdef SHARKOON_PERF_BENCHMARK
+    sharkoon_perf_enable_dwt();
+#endif
     sharkoon_caps_lock_active = host_keyboard_led_state().caps_lock;
     sharkoon_apply_disabled_led_flags();
     sharkoon_refresh_keymap_led_cache();

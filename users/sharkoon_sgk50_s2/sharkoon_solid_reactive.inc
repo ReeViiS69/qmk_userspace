@@ -115,6 +115,10 @@ static bool                 sharkoon_nsr_frame_ready;
 bool SOLID_REACTIVE(effect_params_t *params) {
     RGB_MATRIX_USE_LIMITS(led_min, led_max);
 
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_solid_chunk_start = sharkoon_perf_cycle_now();
+#endif
+
     /*
      * QMK can split one RGB frame over several iterations depending on
      * RGB_MATRIX_LED_PROCESS_LIMIT. Capture one timestamp for the complete
@@ -233,6 +237,16 @@ bool SOLID_REACTIVE(effect_params_t *params) {
         const rgb_t rgb = rgb_matrix_hsv_to_rgb(hsv);
         rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
     }
+
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_solid_chunk_cycles = sharkoon_perf_cycle_now() - perf_solid_chunk_start;
+    sharkoon_perf_accumulate(
+        &sharkoon_perf_rgb_stats.solid_chunk_sum,
+        &sharkoon_perf_rgb_stats.solid_chunk_max,
+        &sharkoon_perf_rgb_stats.solid_chunk_count,
+        perf_solid_chunk_cycles
+    );
+#endif
 
     return rgb_matrix_check_finished_leds(led_max);
 }
