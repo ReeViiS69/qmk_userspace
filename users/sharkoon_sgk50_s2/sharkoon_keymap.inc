@@ -88,6 +88,7 @@ static bool     sharkoon_macro_blink_on       = false;
 static uint16_t sharkoon_macro_blink_timer    = 0;
 static uint8_t  sharkoon_recording_led        = NO_LED;
 static uint8_t  sharkoon_caps_lock_led        = NO_LED;
+static bool     sharkoon_caps_lock_active     = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
 static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
@@ -185,33 +186,33 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
                 continue;
             }
 
-            uint16_t keycodes[DYNAMIC_KEYMAP_LAYER_COUNT];
-            for (uint8_t layer = 0; layer < layer_count; ++layer) {
-                keycodes[layer] = dynamic_keymap_get_keycode(layer, row, col);
+            if (layer_count == 0) {
+                continue;
             }
+
+            uint16_t effective_keycode = dynamic_keymap_get_keycode(0, row, col);
 
             // Caps is intentionally tied to KC_CAPS on the base layer rather
             // than to a hard-coded matrix position.
-            if (sharkoon_caps_lock_led == NO_LED && layer_count > 0 && keycodes[0] == KC_CAPS) {
+            if (sharkoon_caps_lock_led == NO_LED && effective_keycode == KC_CAPS) {
                 sharkoon_caps_lock_led = led;
             }
 
-            // Pre-resolve every selectable layer once. Transparent keys walk
-            // down through the configured layers, even if an intermediate
-            // layer will not itself be active later. The first non-transparent
-            // key blocks everything below it.
-            for (uint8_t top_layer = 1; top_layer < layer_count; ++top_layer) {
-                for (int8_t layer = (int8_t)top_layer; layer >= 0; --layer) {
-                    const uint16_t keycode = keycodes[(uint8_t)layer];
+            /*
+             * Resolve selectable layers in one upward pass. A transparent key
+             * inherits the already resolved keycode below it; a non-transparent
+             * key replaces it. This is exactly what the previous backwards scan
+             * did for every top layer, but O(layers) instead of O(layers^2).
+             */
+            for (uint8_t layer = 1; layer < layer_count; ++layer) {
+                const uint16_t keycode = dynamic_keymap_get_keycode(layer, row, col);
 
-                    if (keycode == KC_TRNS) {
-                        continue;
-                    }
+                if (keycode != KC_TRNS) {
+                    effective_keycode = keycode;
+                }
 
-                    if (keycode == REC_M0 || keycode == REC_M1) {
-                        sharkoon_macro_layer_add_led(top_layer, led);
-                    }
-                    break;
+                if (effective_keycode == REC_M0 || effective_keycode == REC_M1) {
+                    sharkoon_macro_layer_add_led(layer, led);
                 }
             }
         }
@@ -271,11 +272,22 @@ static void sharkoon_observe_via_command(uint8_t *data, uint8_t length) {
 #endif
 
 #ifdef VIALRGB_DIRECT_ENABLE
+void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length);
+
 static uint32_t sharkoon_direct_last_packet = 0;
 static bool     sharkoon_direct_seen        = false;
 
 bool sharkoon_direct_stream_active(void) {
-    return sharkoon_direct_seen && timer_elapsed32(sharkoon_direct_last_packet) < 250;
+    if (!sharkoon_direct_seen) {
+        return false;
+    }
+
+    if (timer_elapsed32(sharkoon_direct_last_packet) >= 250) {
+        sharkoon_direct_seen = false;
+        return false;
+    }
+
+    return true;
 }
 #endif
 
@@ -287,6 +299,7 @@ bool via_command_kb(uint8_t *data, uint8_t length) {
 
 #ifdef VIALRGB_DIRECT_ENABLE
     if (length >= 2 && data[0] == id_custom_set_value && data[1] == vialrgb_direct_fastset) {
+        sharkoon_direct_mark_dirty_packet(data, length);
         sharkoon_direct_last_packet = timer_read32();
         sharkoon_direct_seen        = true;
     }
@@ -299,8 +312,14 @@ bool via_command_kb(uint8_t *data, uint8_t length) {
 
 #ifdef RGB_MATRIX_ENABLE
 void keyboard_post_init_user(void) {
+    sharkoon_caps_lock_active = host_keyboard_led_state().caps_lock;
     sharkoon_apply_disabled_led_flags();
     sharkoon_refresh_keymap_led_cache();
+}
+
+bool led_update_user(led_t led_state) {
+    sharkoon_caps_lock_active = led_state.caps_lock;
+    return true;
 }
 
 layer_state_t layer_state_set_user(layer_state_t state) {
@@ -753,7 +772,7 @@ bool rgb_matrix_indicators_user(void) {
     // on those LEDs intentionally afterwards.
     sharkoon_clear_disabled_leds();
 
-    if (host_keyboard_led_state().caps_lock && sharkoon_caps_lock_led != NO_LED) {
+    if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
         const uint8_t brightness = rgb_matrix_config.hsv.v;
         rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
     }

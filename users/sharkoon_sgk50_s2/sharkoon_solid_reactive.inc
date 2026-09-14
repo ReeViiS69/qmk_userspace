@@ -86,8 +86,9 @@ void sharkoon_solid_reactive_process_key_event(keyrecord_t *record) {
 /*
  * Everything below is constant for all chunks of one complete RGB frame.
  * QMK may split a frame via RGB_MATRIX_LED_PROCESS_LIMIT, so calculating
- * these values only at iter == 0 removes repeated HSV conversion, speed
- * lookups and the 16-bit division from every following chunk.
+ * these values only at iter == 0 keeps every render chunk on one snapshot.
+ * HSV conversion and the 16-bit fade-duration division are additionally
+ * cached across frames until their corresponding settings change.
  */
 typedef struct {
     uint32_t frame_time;
@@ -127,22 +128,33 @@ bool SOLID_REACTIVE(effect_params_t *params) {
         sharkoon_nsr_frame.frame_time = sync_timer_read32();
         memcpy(sharkoon_nsr_held_frame, sharkoon_nsr_held_live, sizeof(sharkoon_nsr_held_frame));
 
-        sharkoon_nsr_frame.base_hsv = rgb_matrix_get_hsv();
-        sharkoon_nsr_frame.base_rgb = rgb_matrix_hsv_to_rgb(sharkoon_nsr_frame.base_hsv);
+        /*
+         * The configured HSV normally stays unchanged for thousands of
+         * frames. Recompute HSV -> RGB only when the setting actually changes.
+         */
+        const hsv_t base_hsv = rgb_matrix_get_hsv();
+
+        if (!sharkoon_nsr_frame_ready ||
+            base_hsv.h != sharkoon_nsr_frame.base_hsv.h ||
+            base_hsv.s != sharkoon_nsr_frame.base_hsv.s ||
+            base_hsv.v != sharkoon_nsr_frame.base_hsv.v) {
+            sharkoon_nsr_frame.base_hsv = base_hsv;
+            sharkoon_nsr_frame.base_rgb = rgb_matrix_hsv_to_rgb(base_hsv);
+        }
 
         /*
          * Use the same speed scaling principle as QMK's reactive effects.
-         * qadd8 guarantees a minimum multiplier of 1.
+         * qadd8 guarantees a minimum multiplier of 1. The expensive 16-bit
+         * division is cached until speed changes.
          */
-        sharkoon_nsr_frame.speed = qadd8(rgb_matrix_get_speed(), 1);
+        const uint8_t speed = qadd8(rgb_matrix_get_speed(), 1);
 
-        /*
-         * Maximum elapsed time before scale16by8() reaches the end of the
-         * 0..255 fade range. This 16-bit division now happens once per full
-         * frame instead of once per render chunk.
-         */
-        sharkoon_nsr_frame.max_tick = UINT16_MAX / sharkoon_nsr_frame.speed;
-        sharkoon_nsr_frame_ready    = true;
+        if (!sharkoon_nsr_frame_ready || speed != sharkoon_nsr_frame.speed) {
+            sharkoon_nsr_frame.speed    = speed;
+            sharkoon_nsr_frame.max_tick = UINT16_MAX / speed;
+        }
+
+        sharkoon_nsr_frame_ready = true;
     }
 
     const hsv_t    base_hsv = sharkoon_nsr_frame.base_hsv;
@@ -205,7 +217,7 @@ bool SOLID_REACTIVE(effect_params_t *params) {
          * brightness. Hue and saturation always follow the current settings.
          * Only actively fading LEDs need an HSV -> RGB conversion.
          */
-        const uint32_t elapsed = sync_timer_elapsed32(sharkoon_nsr_state[i]);
+        const uint32_t elapsed = sharkoon_nsr_frame.frame_time - sharkoon_nsr_state[i];
         const uint16_t tick    = elapsed >= max_tick ? max_tick : (uint16_t)elapsed;
         const uint16_t offset  = scale16by8(tick, speed);
 

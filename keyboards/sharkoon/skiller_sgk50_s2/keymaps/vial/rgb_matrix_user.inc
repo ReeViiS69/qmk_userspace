@@ -18,8 +18,86 @@ bool sharkoon_direct_stream_active(void);
 #endif
 
 #define SHARKOON_PALETTE_COLOR_COUNT 16u
+#define SHARKOON_FLOW_COLOR_COUNT    128u
+#define SHARKOON_DIRECT_DIRTY_WORDS  ((RGB_MATRIX_LED_COUNT + 31u) / 32u)
 #define SHARKOON_REACTIVE_RADIUS     16u
 #define SHARKOON_REACTIVE_DIAMETER   (SHARKOON_REACTIVE_RADIUS * 2u)
+
+/*
+ * =============================================================
+ * VIAL DIRECT RGB CACHE
+ * =============================================================
+ *
+ * Vial stores Direct colors as HSV. Convert only LEDs whose HSV values were
+ * changed by a vialrgb_direct_fastset packet instead of converting every LED
+ * again on every rendered Direct frame.
+ */
+static rgb_t    sharkoon_direct_rgb_cache[RGB_MATRIX_LED_COUNT];
+static uint32_t sharkoon_direct_dirty[SHARKOON_DIRECT_DIRTY_WORDS];
+static bool     sharkoon_direct_cache_initialized;
+
+static inline void sharkoon_direct_mark_dirty(uint8_t led) {
+    sharkoon_direct_dirty[led >> 5] |= UINT32_C(1) << (led & 31u);
+}
+
+static inline bool sharkoon_direct_is_dirty(uint8_t led) {
+    return (sharkoon_direct_dirty[led >> 5] & (UINT32_C(1) << (led & 31u))) != 0;
+}
+
+static inline void sharkoon_direct_clear_dirty(uint8_t led) {
+    sharkoon_direct_dirty[led >> 5] &= ~(UINT32_C(1) << (led & 31u));
+}
+
+static void sharkoon_direct_prepare_cache(void) {
+    if (sharkoon_direct_cache_initialized) {
+        return;
+    }
+
+    memset(sharkoon_direct_dirty, 0xFF, sizeof(sharkoon_direct_dirty));
+    sharkoon_direct_cache_initialized = true;
+}
+
+/*
+ * Called from via_command_kb() before Vial processes the packet. The packet
+ * format is: command, subcommand, first LED lo/hi, count, then count * HSV.
+ * Marking before the core write is safe because rendering cannot run until the
+ * VIA command returns and the new g_direct_mode_colors[] values are in place.
+ */
+void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length) {
+    if (length < 5) {
+        return;
+    }
+
+    const uint16_t first_index = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    const uint8_t  num_leds    = data[4];
+
+    if ((uint16_t)num_leds * 3u > (uint16_t)(length - 5u) ||
+        first_index >= RGB_MATRIX_LED_COUNT) {
+        return;
+    }
+
+    uint16_t end = first_index + num_leds;
+    if (end > RGB_MATRIX_LED_COUNT) {
+        end = RGB_MATRIX_LED_COUNT;
+    }
+
+    for (uint16_t led = first_index; led < end; ++led) {
+        sharkoon_direct_mark_dirty((uint8_t)led);
+    }
+}
+
+static inline rgb_t sharkoon_direct_get_rgb(uint8_t led) {
+    if (sharkoon_direct_is_dirty(led)) {
+        sharkoon_direct_rgb_cache[led] =
+            rgb_matrix_hsv_to_rgb(
+                g_direct_mode_colors[led]
+            );
+
+        sharkoon_direct_clear_dirty(led);
+    }
+
+    return sharkoon_direct_rgb_cache[led];
+}
 
 /*
  * =============================================================
@@ -94,6 +172,66 @@ static inline hsv_t sharkoon_palette_interp_raw(const hsv_t *palette, uint8_t x)
                 frac
             ),
     };
+}
+
+/*
+ * The folded flow function below can only produce even values 0..254.
+ * Therefore the complete palette/interpolation/phosphor correction stage has
+ * exactly 128 possible RGB results. Cache those results until either the
+ * selected PaletteFx palette or the low-brightness hue floor changes.
+ *
+ * This removes palette interpolation and HSV -> RGB conversion from the
+ * per-LED render hot path without approximating the effect.
+ */
+static rgb_t           sharkoon_flow_rgb_cache[SHARKOON_FLOW_COLOR_COUNT];
+static const uint16_t *sharkoon_flow_cache_palette;
+static uint8_t         sharkoon_flow_cache_minimum_hue;
+static bool            sharkoon_flow_cache_valid;
+
+static void sharkoon_update_flow_rgb_cache(const uint16_t *palette_data, uint8_t minimum_hue) {
+    if (sharkoon_flow_cache_valid &&
+        sharkoon_flow_cache_palette == palette_data &&
+        sharkoon_flow_cache_minimum_hue == minimum_hue) {
+        return;
+    }
+
+    hsv_t palette[SHARKOON_PALETTE_COLOR_COUNT];
+
+    for (uint8_t i = 0; i < SHARKOON_PALETTE_COLOR_COUNT; ++i) {
+        palette[i] =
+            sharkoon_unpack_hsv16(
+                pgm_read_word(&palette_data[i])
+            );
+    }
+
+    for (uint8_t i = 0; i < SHARKOON_FLOW_COLOR_COUNT; ++i) {
+        const uint8_t flow_value = i << 1;
+
+        hsv_t hsv =
+            sharkoon_palette_interp_raw(
+                palette,
+                flow_value
+            );
+
+        if (hsv.v > 220) {
+            hsv.v =
+                220 +
+                scale8(
+                    hsv.v - 220,
+                    128
+                );
+        }
+
+        if (hsv.h < minimum_hue) {
+            hsv.h = minimum_hue;
+        }
+
+        sharkoon_flow_rgb_cache[i] = rgb_matrix_hsv_to_rgb(hsv);
+    }
+
+    sharkoon_flow_cache_palette     = palette_data;
+    sharkoon_flow_cache_minimum_hue = minimum_hue;
+    sharkoon_flow_cache_valid       = true;
 }
 
 /*
@@ -181,13 +319,11 @@ static const uint8_t PROGMEM sharkoon_reactive_falloff[256] = {
  */
 typedef struct {
     bool    direct_stream_active;
-    hsv_t   palette[SHARKOON_PALETTE_COLOR_COUNT];
     uint16_t flow_time;
     int8_t  rot_c;
     int8_t  rot_s;
     uint8_t omega;
     uint8_t sparkle_time;
-    uint8_t minimum_hue;
     uint8_t effective_value;
     uint8_t hit_count;
     uint8_t hit_x[LED_HITS_TO_REMEMBER];
@@ -206,23 +342,12 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * gebraucht. Den Snapshot erst vorbereiten, wenn tatsächlich gerendert wird.
      */
     if (sharkoon_hybrid_frame.direct_stream_active) {
+        sharkoon_direct_prepare_cache();
         return;
     }
 
     const uint16_t *palette = palettefx_get_palette_data();
-
-    /*
-     * Die Palette enthält genau 16 Stützfarben. Vorher wurden pro LED zwei
-     * pgm_read_word() + Unpack ausgeführt; jetzt einmal pro Frame pro Farbe.
-     */
-    for (uint8_t i = 0; i < SHARKOON_PALETTE_COLOR_COUNT; ++i) {
-        sharkoon_hybrid_frame.palette[i] =
-            sharkoon_unpack_hsv16(
-                pgm_read_word(&palette[i])
-            );
-    }
-
-    const uint8_t speed        = rgb_matrix_config.speed;
+    const uint8_t   speed   = rgb_matrix_config.speed;
     const uint8_t global_value = rgb_matrix_config.hsv.v;
 
     /*
@@ -253,16 +378,18 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * LOW-BRIGHTNESS / GLOBAL BRIGHTNESS STATE
      * =========================================================
      */
-    sharkoon_hybrid_frame.minimum_hue = 40;
+    uint8_t minimum_hue = 40;
 
     if (global_value < 80) {
-        sharkoon_hybrid_frame.minimum_hue =
+        minimum_hue =
             40 +
             scale8(
                 80 - global_value,
                 64
             );
     }
+
+    sharkoon_update_flow_rgb_cache(palette, minimum_hue);
 
     sharkoon_hybrid_frame.effective_value =
         scale8(
@@ -354,10 +481,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
      */
     if (sharkoon_hybrid_frame.direct_stream_active) {
         for (uint8_t i = led_min; i < led_max; ++i) {
-            const rgb_t rgb =
-                rgb_matrix_hsv_to_rgb(
-                    g_direct_mode_colors[i]
-                );
+            const rgb_t rgb = sharkoon_direct_get_rgb(i);
 
             rgb_matrix_set_color(
                 i,
@@ -375,7 +499,6 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const int8_t   rot_s             = sharkoon_hybrid_frame.rot_s;
     const uint8_t  omega             = sharkoon_hybrid_frame.omega;
     const uint8_t  sparkle_time      = sharkoon_hybrid_frame.sparkle_time;
-    const uint8_t  minimum_hue       = sharkoon_hybrid_frame.minimum_hue;
     const uint8_t  effective_value   = sharkoon_hybrid_frame.effective_value;
     const uint8_t  hit_count         = sharkoon_hybrid_frame.hit_count;
 
@@ -438,51 +561,14 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
             );
 
         /*
-         * Rohe Phosphor-Farbe.
+         * FLOW RGB FAST PATH
          *
-         * KEINE globale Helligkeit hier.
+         * flow_value is always even after the fold above. Palette
+         * interpolation, highlight compression, the low-brightness hue floor
+         * and HSV -> RGB conversion are therefore represented exactly by one
+         * of 128 cached RGB entries. Global brightness is still applied later.
          */
-        hsv_t hsv =
-            sharkoon_palette_interp_raw(
-                sharkoon_hybrid_frame.palette,
-                flow_value
-            );
-
-        /*
-         * Sehr helle Stellen des Flow-Ribbons leicht komprimieren.
-         *
-         * Sparkle und Reactive passieren erst später und bleiben
-         * deshalb vollständig unangetastet.
-         */
-        if (hsv.v > 220) {
-            hsv.v =
-                220 +
-                scale8(
-                    hsv.v - 220,
-                    128
-                );
-        }
-
-        /*
-         * LOW-BRIGHTNESS PHOSPHOR CORRECTION
-         *
-         * minimum_hue wurde einmal pro Frame aus global_value berechnet.
-         */
-        if (hsv.h < minimum_hue) {
-            hsv.h = minimum_hue;
-        }
-
-        /*
-         * Die Saturation der Palette gehoert zum Effekt selbst.
-         * VIAL/VIA-Saturation wird hier bewusst NICHT angewendet:
-         * Der Color-Picker darf die Phosphor-Palette nicht Richtung Weiss
-         * auswaschen. Globale Helligkeit und Speed bleiben weiterhin aktiv.
-         */
-
-        /*
-         * Vorerst volle interne RGB-Farbe.
-         */
-        rgb_t rgb = rgb_matrix_hsv_to_rgb(hsv);
+        rgb_t rgb = sharkoon_flow_rgb_cache[flow_value >> 1];
 
         /*
          * =====================================================
