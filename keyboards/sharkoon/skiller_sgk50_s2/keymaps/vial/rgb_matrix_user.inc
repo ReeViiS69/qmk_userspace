@@ -648,29 +648,81 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          */
         uint8_t reactive_value = 0;
 
+        /*
+         * LED_HITS_TO_REMEMBER is fixed at 8. Dispatch once on the current
+         * count and then fall through a fully static sequence. This keeps one
+         * implementation for every possible 0..8 hit count while removing the
+         * runtime loop counter, loop branch and variable hit-array indexing.
+         *
+         * Hits are accumulated newest-to-oldest here. qadd8() is saturating
+         * addition of non-negative contributions, so the final uint8_t result
+         * is identical to the old oldest-to-newest loop. Once 255 is reached,
+         * later contributions cannot change it and we can leave the switch.
+         */
+#        define SHARKOON_ADD_REACTIVE_HIT(hit_index)                                                   \
+            do {                                                                                       \
+                const uint8_t feathered_falloff =                                                      \
+                    pgm_read_byte(&sharkoon_hybrid_frame.hit_falloff[(hit_index)][i]);                 \
+                                                                                                       \
+                if (feathered_falloff != 0) {                                                         \
+                    reactive_value =                                                                   \
+                        qadd8(                                                                          \
+                            reactive_value,                                                            \
+                            scale8(                                                                     \
+                                feathered_falloff,                                                     \
+                                sharkoon_hybrid_frame.hit_amplitude[(hit_index)]                       \
+                            )                                                                           \
+                        );                                                                              \
+                }                                                                                      \
+            } while (0)
+
+#        if LED_HITS_TO_REMEMBER == 8
+        switch (hit_count) {
+            case 8:
+                SHARKOON_ADD_REACTIVE_HIT(7);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 7:
+                SHARKOON_ADD_REACTIVE_HIT(6);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 6:
+                SHARKOON_ADD_REACTIVE_HIT(5);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 5:
+                SHARKOON_ADD_REACTIVE_HIT(4);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 4:
+                SHARKOON_ADD_REACTIVE_HIT(3);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 3:
+                SHARKOON_ADD_REACTIVE_HIT(2);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 2:
+                SHARKOON_ADD_REACTIVE_HIT(1);
+                if (reactive_value == 255) { break; }
+                __attribute__((fallthrough));
+            case 1:
+                SHARKOON_ADD_REACTIVE_HIT(0);
+                break;
+            default:
+                break;
+        }
+#        else
+        /* Preserve compatibility if the tracker depth is changed from 8. */
         for (uint8_t j = 0; j < hit_count; ++j) {
-            const uint8_t feathered_falloff =
-                pgm_read_byte(
-                    &sharkoon_hybrid_frame.hit_falloff[j][i]
-                );
-
-            if (feathered_falloff == 0) {
-                continue;
-            }
-
-            reactive_value =
-                qadd8(
-                    reactive_value,
-                    scale8(
-                        feathered_falloff,
-                        sharkoon_hybrid_frame.hit_amplitude[j]
-                    )
-                );
-
+            SHARKOON_ADD_REACTIVE_HIT(j);
             if (reactive_value == 255) {
                 break;
             }
         }
+#        endif
+
+#        undef SHARKOON_ADD_REACTIVE_HIT
 
         if (reactive_value != 0) {
             const uint8_t reactive_white =
