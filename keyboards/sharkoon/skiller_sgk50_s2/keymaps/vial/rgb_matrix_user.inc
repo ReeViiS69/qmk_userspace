@@ -52,6 +52,15 @@ bool sharkoon_direct_stream_active(void);
 #    error "SHARKOON HYBRID requires RGB_MATRIX_KEYREACTIVE_ENABLED"
 #endif
 
+/*
+ * QMK includes this custom-effect implementation before rgb_matrix.c's own
+ * tentative definition of last_hit_buffer. Repeat the compatible tentative
+ * declaration here so this effect can release only its own finished reactive
+ * history without modifying QMK core source. Both declarations name the same
+ * file-local object in the rgb_matrix.c translation unit.
+ */
+static last_hit_t last_hit_buffer;
+
 #include "sharkoon_hybrid_luts.inc"
 
 #define SHARKOON_PALETTE_COLOR_COUNT 16u
@@ -335,6 +344,7 @@ static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
 static bool                    sharkoon_hybrid_frame_ready;
 static bool                    sharkoon_hybrid_reactive_nonzero;
 static bool                    sharkoon_hybrid_reactive_active = true;
+static bool                    sharkoon_hybrid_reactive_wake_pending;
 
 /*
  * Event-side wakeup only. QMK's g_last_hit_tracker remains the sole source of
@@ -356,7 +366,8 @@ void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record) {
     return;
 #    endif
 
-    sharkoon_hybrid_reactive_active = true;
+    sharkoon_hybrid_reactive_active       = true;
+    sharkoon_hybrid_reactive_wake_pending = true;
 }
 
 static void sharkoon_prepare_hybrid_frame(void) {
@@ -528,9 +539,15 @@ static void sharkoon_prepare_hybrid_frame(void) {
     }
 
     /*
-     * The first frame with no visible hit clears the old field once, then puts
-     * the reactive lifecycle to sleep. Later frames return above without even
-     * reading the stale QMK tracker until a real wake condition occurs.
+     * The first frame with no visible hit clears the old field. A matching key
+     * event may have arrived after QMK copied last_hit_buffer into
+     * g_last_hit_tracker for this frame, so one pending wake is used as a
+     * one-frame fence: keep the source buffer and reevaluate the next snapshot.
+     *
+     * Once an empty snapshot is observed without that fence, this Hybrid effect
+     * knows its reactive history is finished. Drop the QMK source-buffer count
+     * locally so rgb_task_timers() stops aging up to eight dead hits for ~65 s.
+     * No QMK core source, other effect, or Direct-RGB path is changed.
      */
     if (sharkoon_hybrid_frame.hit_count == 0) {
         if (sharkoon_hybrid_reactive_nonzero) {
@@ -542,7 +559,13 @@ static void sharkoon_prepare_hybrid_frame(void) {
             sharkoon_hybrid_reactive_nonzero = false;
         }
 
-        sharkoon_hybrid_reactive_active = false;
+        if (sharkoon_hybrid_reactive_wake_pending) {
+            sharkoon_hybrid_reactive_wake_pending = false;
+            return;
+        }
+
+        last_hit_buffer.count             = 0;
+        sharkoon_hybrid_reactive_active   = false;
         return;
     }
 
