@@ -6,6 +6,13 @@
 void sharkoon_apply_disabled_led_flags(void);
 void sharkoon_clear_disabled_leds(void);
 void sharkoon_solid_reactive_process_key_event(keyrecord_t *record);
+/*
+ * Declaration is intentionally unconditional inside RGB_MATRIX_ENABLE.
+ * sharkoon_keymap.inc includes this header before vialrgb.h; VIALRGB_DIRECT_ENABLE
+ * may therefore not exist yet at this point even though it is defined later in
+ * the same translation unit. The call itself remains VIALRGB_DIRECT_ENABLE-guarded.
+ */
+void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record);
 #endif
 
 #ifdef SHARKOON_PERF_BENCHMARK

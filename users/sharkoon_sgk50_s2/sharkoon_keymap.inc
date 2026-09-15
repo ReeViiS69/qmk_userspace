@@ -811,6 +811,9 @@ bool pre_process_record_user(uint16_t keycode, keyrecord_t *record) {
     sharkoon_perf_note_key_event(record);
 #endif
     sharkoon_solid_reactive_process_key_event(record);
+#    ifdef VIALRGB_DIRECT_ENABLE
+    sharkoon_hybrid_reactive_process_key_event(record);
+#    endif
     return true;
 }
 #endif

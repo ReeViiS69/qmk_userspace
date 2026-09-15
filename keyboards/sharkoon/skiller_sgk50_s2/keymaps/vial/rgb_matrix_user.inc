@@ -334,6 +334,32 @@ typedef struct {
 static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
 static bool                    sharkoon_hybrid_frame_ready;
 static bool                    sharkoon_hybrid_reactive_nonzero;
+static bool                    sharkoon_hybrid_reactive_active = true;
+static bool                    sharkoon_hybrid_reactive_speed_valid;
+static uint8_t                 sharkoon_hybrid_reactive_speed;
+
+/*
+ * Event-side wakeup only. QMK's g_last_hit_tracker remains the sole source of
+ * hit identity/age; this flag merely says that the next Hybrid frame must
+ * inspect it again. Mirror QMK's KEYRELEASES/KEYPRESSES selection so ordinary
+ * key traffic cannot wake the reactive builder at twice the necessary rate.
+ */
+void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record) {
+#    if defined(RGB_MATRIX_KEYRELEASES)
+    if (record->event.pressed) {
+        return;
+    }
+#    elif defined(RGB_MATRIX_KEYPRESSES)
+    if (!record->event.pressed) {
+        return;
+    }
+#    else
+    (void)record;
+    return;
+#    endif
+
+    sharkoon_hybrid_reactive_active = true;
+}
 
 static void sharkoon_prepare_hybrid_frame(void) {
     sharkoon_hybrid_frame.direct_stream_active = sharkoon_direct_stream_active();
@@ -350,6 +376,18 @@ static void sharkoon_prepare_hybrid_frame(void) {
     const uint16_t *palette = palettefx_get_palette_data();
     const uint8_t   speed   = rgb_matrix_config.speed;
     const uint8_t global_value = rgb_matrix_config.hsv.v;
+
+    /*
+     * Speed changes can make an old QMK hit visible again because hit age is
+     * scaled by speed. Re-open the reactive lifecycle exactly once when the
+     * setting changes; no polling of the tracker is needed while inactive.
+     */
+    if (!sharkoon_hybrid_reactive_speed_valid ||
+        speed != sharkoon_hybrid_reactive_speed) {
+        sharkoon_hybrid_reactive_speed       = speed;
+        sharkoon_hybrid_reactive_speed_valid = true;
+        sharkoon_hybrid_reactive_active      = true;
+    }
 
     /*
      * =========================================================
@@ -435,14 +473,24 @@ static void sharkoon_prepare_hybrid_frame(void) {
      *   - spatial contribution: once per non-zero hit/LED pair per RGB frame
      *   - render path: one byte lookup per LED
      */
+    sharkoon_hybrid_frame.hit_count = 0;
+
+    /*
+     * Once a frame proves that no reactive contribution remains, stop touching
+     * g_last_hit_tracker on later frames. A matching key event or speed change
+     * wakes this section again. This is the important 3J gate:
+     * stale QMK hits cost zero Hybrid reactive work while asleep.
+     */
+    if (!sharkoon_hybrid_reactive_active) {
+        return;
+    }
+
     const uint8_t source_hit_count =
         g_last_hit_tracker.count < LED_HITS_TO_REMEMBER
             ? g_last_hit_tracker.count
             : LED_HITS_TO_REMEMBER;
 
     uint16_t active_hits[LED_HITS_TO_REMEMBER];
-
-    sharkoon_hybrid_frame.hit_count = 0;
 
     for (uint8_t j = 0; j < source_hit_count; ++j) {
         const uint16_t tick =
@@ -486,10 +534,9 @@ static void sharkoon_prepare_hybrid_frame(void) {
     }
 
     /*
-     * If the previous frame was already completely non-reactive, leave the
-     * zeroed field untouched. Stale QMK tracker entries therefore cost only
-     * their once-per-frame age/amplitude check and never trigger a 104-byte
-     * clear or any spatial work.
+     * The first frame with no visible hit clears the old field once, then puts
+     * the reactive lifecycle to sleep. Later frames return above without even
+     * reading the stale QMK tracker until a real wake condition occurs.
      */
     if (sharkoon_hybrid_frame.hit_count == 0) {
         if (sharkoon_hybrid_reactive_nonzero) {
@@ -501,6 +548,7 @@ static void sharkoon_prepare_hybrid_frame(void) {
             sharkoon_hybrid_reactive_nonzero = false;
         }
 
+        sharkoon_hybrid_reactive_active = false;
         return;
     }
 
