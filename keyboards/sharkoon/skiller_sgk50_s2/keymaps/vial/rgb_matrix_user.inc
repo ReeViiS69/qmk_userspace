@@ -335,8 +335,6 @@ static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
 static bool                    sharkoon_hybrid_frame_ready;
 static bool                    sharkoon_hybrid_reactive_nonzero;
 static bool                    sharkoon_hybrid_reactive_active = true;
-static bool                    sharkoon_hybrid_reactive_speed_valid;
-static uint8_t                 sharkoon_hybrid_reactive_speed;
 
 /*
  * Event-side wakeup only. QMK's g_last_hit_tracker remains the sole source of
@@ -376,18 +374,6 @@ static void sharkoon_prepare_hybrid_frame(void) {
     const uint16_t *palette = palettefx_get_palette_data();
     const uint8_t   speed   = rgb_matrix_config.speed;
     const uint8_t global_value = rgb_matrix_config.hsv.v;
-
-    /*
-     * Speed changes can make an old QMK hit visible again because hit age is
-     * scaled by speed. Re-open the reactive lifecycle exactly once when the
-     * setting changes; no polling of the tracker is needed while inactive.
-     */
-    if (!sharkoon_hybrid_reactive_speed_valid ||
-        speed != sharkoon_hybrid_reactive_speed) {
-        sharkoon_hybrid_reactive_speed       = speed;
-        sharkoon_hybrid_reactive_speed_valid = true;
-        sharkoon_hybrid_reactive_active      = true;
-    }
 
     /*
      * =========================================================
@@ -477,9 +463,10 @@ static void sharkoon_prepare_hybrid_frame(void) {
 
     /*
      * Once a frame proves that no reactive contribution remains, stop touching
-     * g_last_hit_tracker on later frames. A matching key event or speed change
-     * wakes this section again. This is the important 3J gate:
-     * stale QMK hits cost zero Hybrid reactive work while asleep.
+     * g_last_hit_tracker on later frames. Only a matching key event wakes this
+     * section again. Speed may change while asleep, but an already-finished hit
+     * stays finished instead of being resurrected by a later setting change.
+     * Stale QMK hits therefore cost zero Hybrid reactive work while asleep.
      */
     if (!sharkoon_hybrid_reactive_active) {
         return;
@@ -492,11 +479,18 @@ static void sharkoon_prepare_hybrid_frame(void) {
 
     uint16_t active_hits[LED_HITS_TO_REMEMBER];
 
+    /*
+     * Reactive speed matters only while the lifecycle is actually active.
+     * Keep the derived scale local to this evaluation; it is not persistent
+     * state and cannot wake a sleeping lifecycle.
+     */
+    const uint8_t reactive_scale = 1 + speed / 4;
+
     for (uint8_t j = 0; j < source_hit_count; ++j) {
         const uint16_t tick =
             scale16by8(
                 g_last_hit_tracker.tick[j],
-                1 + speed / 4
+                reactive_scale
             );
 
         uint8_t amplitude = 0;
