@@ -810,10 +810,31 @@ bool pre_process_record_user(uint16_t keycode, keyrecord_t *record) {
 #ifdef SHARKOON_PERF_BENCHMARK
     sharkoon_perf_note_key_event(record);
 #endif
-    sharkoon_solid_reactive_process_key_event(record);
+
+    /*
+     * Maintain only the event-side state required by the currently selected
+     * Sharkoon effect. Solid Reactive reconstructs held keys once on effect
+     * entry, so other RGB modes no longer pay for its held-bitset updates.
+     */
+    if (!rgb_matrix_config.enable) {
+        return true;
+    }
+
+    switch (rgb_matrix_config.mode) {
+        case RGB_MATRIX_SOLID_REACTIVE:
+            sharkoon_solid_reactive_process_key_event(record);
+            break;
+
 #    ifdef VIALRGB_DIRECT_ENABLE
-    sharkoon_hybrid_reactive_process_key_event(record);
+        case RGB_MATRIX_CUSTOM_VIALRGB_DIRECT:
+            sharkoon_hybrid_reactive_process_key_event(record);
+            break;
 #    endif
+
+        default:
+            break;
+    }
+
     return true;
 }
 #endif

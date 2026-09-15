@@ -341,16 +341,14 @@ typedef struct {
 } sharkoon_hybrid_frame_t;
 
 static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
-static bool                    sharkoon_hybrid_frame_ready;
 static bool                    sharkoon_hybrid_reactive_nonzero;
-static bool                    sharkoon_hybrid_reactive_active = true;
 static bool                    sharkoon_hybrid_reactive_wake_pending;
 
 /*
- * Event-side wakeup only. QMK's g_last_hit_tracker remains the sole source of
- * hit identity/age; this flag merely says that the next Hybrid frame must
- * inspect it again. Mirror QMK's KEYRELEASES/KEYPRESSES selection so ordinary
- * key traffic cannot wake the reactive builder at twice the necessary rate.
+ * Event-side race fence only. QMK's g_last_hit_tracker remains the sole source
+ * of hit identity/age. If a matching key event arrives after QMK snapshotted
+ * last_hit_buffer for the current RGB frame, source-buffer compaction must wait
+ * for the next frame so that newly appended hits cannot be discarded.
  */
 void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record) {
 #    if defined(RGB_MATRIX_KEYRELEASES)
@@ -366,8 +364,39 @@ void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record) {
     return;
 #    endif
 
-    sharkoon_hybrid_reactive_active       = true;
     sharkoon_hybrid_reactive_wake_pending = true;
+}
+
+/*
+ * Remove an already-finished oldest prefix from QMK's source hit buffer.
+ *
+ * The source is compacted only when its count still matches the frame snapshot
+ * and no matching key event was observed after that snapshot. This keeps the
+ * mutation local to the Hybrid effect while preserving any hit that QMK may
+ * have appended for the next frame.
+ */
+static void sharkoon_hybrid_drop_source_prefix(uint8_t drop_count, uint8_t snapshot_count) {
+    if (drop_count == 0 || last_hit_buffer.count != snapshot_count) {
+        return;
+    }
+
+    if (drop_count >= snapshot_count) {
+        last_hit_buffer.count = 0;
+        return;
+    }
+
+    const uint8_t remaining = snapshot_count - drop_count;
+
+    memmove(&last_hit_buffer.x[0], &last_hit_buffer.x[drop_count], remaining);
+    memmove(&last_hit_buffer.y[0], &last_hit_buffer.y[drop_count], remaining);
+    memmove(&last_hit_buffer.index[0], &last_hit_buffer.index[drop_count], remaining);
+    memmove(
+        &last_hit_buffer.tick[0],
+        &last_hit_buffer.tick[drop_count],
+        remaining * sizeof(last_hit_buffer.tick[0])
+    );
+
+    last_hit_buffer.count = remaining;
 }
 
 static void sharkoon_prepare_hybrid_frame(void) {
@@ -458,46 +487,41 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * REACTIVE STATE
      * =========================================================
      *
-     * g_last_hit_tracker is consumed exactly once per RGB frame here.
+     * QMK stores hits oldest -> newest. Hit age therefore increases while
+     * walking the snapshot backwards. Once an old hit has reached amplitude 0,
+     * every hit before it is older and can never contribute either.
      *
-     * First resolve the time-dependent state of at most eight hits. Then build
-     * the complete 104-byte reactive field once from the sparse non-zero
-     * source/target graph. Render chunks only read reactive_value[led]; they no
-     * longer loop over the hit tracker or over active hits.
-     *
-     * This keeps the work at the highest valid frequency:
-     *   - hit age/amplitude: once per hit per RGB frame
-     *   - spatial contribution: once per non-zero hit/LED pair per RGB frame
-     *   - render path: one byte lookup per LED
+     * Build the complete sparse reactive field directly in that reverse walk.
+     * This removes the former active_hits[] staging buffer and its second hit
+     * pass. The first finished hit also identifies a dead oldest prefix that
+     * can be compacted out of QMK's source buffer when the frame snapshot is
+     * known to be current.
      */
     sharkoon_hybrid_frame.hit_count = 0;
 
-    /*
-     * Once a frame proves that no reactive contribution remains, stop touching
-     * g_last_hit_tracker on later frames. Only a matching key event wakes this
-     * section again. Speed may change while asleep, but an already-finished hit
-     * stays finished instead of being resurrected by a later setting change.
-     * Stale QMK hits therefore cost zero Hybrid reactive work while asleep.
-     */
-    if (!sharkoon_hybrid_reactive_active) {
+    const uint8_t source_hit_count       = g_last_hit_tracker.count;
+    const bool    source_mutation_fenced = sharkoon_hybrid_reactive_wake_pending;
+    sharkoon_hybrid_reactive_wake_pending = false;
+
+    if (source_hit_count == 0) {
+        if (sharkoon_hybrid_reactive_nonzero) {
+            memset(
+                sharkoon_hybrid_frame.reactive_value,
+                0,
+                sizeof(sharkoon_hybrid_frame.reactive_value)
+            );
+            sharkoon_hybrid_reactive_nonzero = false;
+        }
         return;
     }
 
-    const uint8_t source_hit_count =
-        g_last_hit_tracker.count < LED_HITS_TO_REMEMBER
-            ? g_last_hit_tracker.count
-            : LED_HITS_TO_REMEMBER;
-
-    uint16_t active_hits[LED_HITS_TO_REMEMBER];
-
-    /*
-     * Reactive speed matters only while the lifecycle is actually active.
-     * Keep the derived scale local to this evaluation; it is not persistent
-     * state and cannot wake a sleeping lifecycle.
-     */
     const uint8_t reactive_scale = 1 + speed / 4;
+    uint8_t       dead_prefix    = 0;
+    bool          field_cleared  = false;
 
-    for (uint8_t j = 0; j < source_hit_count; ++j) {
+    for (uint8_t hit = source_hit_count; hit > 0; --hit) {
+        const uint8_t j = hit - 1u;
+
         const uint16_t tick =
             scale16by8(
                 g_last_hit_tracker.tick[j],
@@ -529,61 +553,27 @@ static void sharkoon_prepare_hybrid_frame(void) {
             }
         }
 
+        /*
+         * Newer hits were already processed. Because this hit is now finished,
+         * all still-older entries form one removable prefix.
+         */
         if (amplitude == 0) {
-            continue;
+            dead_prefix = hit;
+            break;
         }
 
-        active_hits[sharkoon_hybrid_frame.hit_count++] =
-            ((uint16_t)g_last_hit_tracker.index[j] << 8) |
-            amplitude;
-    }
-
-    /*
-     * The first frame with no visible hit clears the old field. A matching key
-     * event may have arrived after QMK copied last_hit_buffer into
-     * g_last_hit_tracker for this frame, so one pending wake is used as a
-     * one-frame fence: keep the source buffer and reevaluate the next snapshot.
-     *
-     * Once an empty snapshot is observed without that fence, this Hybrid effect
-     * knows its reactive history is finished. Drop the QMK source-buffer count
-     * locally so rgb_task_timers() stops aging up to eight dead hits for ~65 s.
-     * No QMK core source, other effect, or Direct-RGB path is changed.
-     */
-    if (sharkoon_hybrid_frame.hit_count == 0) {
-        if (sharkoon_hybrid_reactive_nonzero) {
+        if (!field_cleared) {
             memset(
                 sharkoon_hybrid_frame.reactive_value,
                 0,
                 sizeof(sharkoon_hybrid_frame.reactive_value)
             );
-            sharkoon_hybrid_reactive_nonzero = false;
+            field_cleared = true;
         }
 
-        if (sharkoon_hybrid_reactive_wake_pending) {
-            sharkoon_hybrid_reactive_wake_pending = false;
-            return;
-        }
+        ++sharkoon_hybrid_frame.hit_count;
 
-        last_hit_buffer.count             = 0;
-        sharkoon_hybrid_reactive_active   = false;
-        return;
-    }
-
-    memset(
-        sharkoon_hybrid_frame.reactive_value,
-        0,
-        sizeof(sharkoon_hybrid_frame.reactive_value)
-    );
-
-    /*
-     * 3B1 accumulated active hits newest -> oldest. Keep that exact order.
-     * qadd8() is saturating; once a target reaches 255, older hits cannot
-     * change it and are skipped for that target.
-     */
-    for (uint8_t hit = sharkoon_hybrid_frame.hit_count; hit > 0; --hit) {
-        const uint16_t packed_hit = active_hits[hit - 1];
-        const uint8_t  source_led = (uint8_t)(packed_hit >> 8);
-        const uint8_t  amplitude  = (uint8_t)packed_hit;
+        const uint8_t source_led = g_last_hit_tracker.index[j];
 
         const uint16_t pair_begin =
             pgm_read_word(
@@ -619,7 +609,26 @@ static void sharkoon_prepare_hybrid_frame(void) {
         }
     }
 
-    sharkoon_hybrid_reactive_nonzero = true;
+    if (sharkoon_hybrid_frame.hit_count != 0) {
+        sharkoon_hybrid_reactive_nonzero = true;
+    } else if (sharkoon_hybrid_reactive_nonzero) {
+        memset(
+            sharkoon_hybrid_frame.reactive_value,
+            0,
+            sizeof(sharkoon_hybrid_frame.reactive_value)
+        );
+        sharkoon_hybrid_reactive_nonzero = false;
+    }
+
+    /*
+     * A matching event after the snapshot fences source mutation for exactly
+     * this frame. Otherwise remove every finished oldest hit immediately so
+     * QMK's rgb_task_timers() only ages hits that can still affect Hybrid.
+     */
+    if (!source_mutation_fenced && dead_prefix != 0) {
+        sharkoon_hybrid_drop_source_prefix(dead_prefix, source_hit_count);
+    }
+
 }
 
 /*
@@ -635,7 +644,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const uint32_t perf_chunk_start = sharkoon_perf_cycle_now();
 #endif
 
-    if (params->iter == 0 || !sharkoon_hybrid_frame_ready) {
+    if (params->iter == 0) {
 #ifdef SHARKOON_PERF_BENCHMARK
         const uint32_t perf_prepare_start = sharkoon_perf_cycle_now();
 #endif
@@ -657,7 +666,6 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
             }
         }
 #endif
-        sharkoon_hybrid_frame_ready = true;
     }
 
     /*

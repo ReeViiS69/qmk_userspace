@@ -57,6 +57,31 @@ static inline void sharkoon_nsr_set_held(uint8_t led, bool held) {
     }
 }
 
+/*
+ * Outside Solid Reactive the held bitset is intentionally not maintained.
+ * Rebuild it once when this effect is entered (or RGB is re-enabled while the
+ * effect is selected), so keys that were already held still start black.
+ */
+static void sharkoon_nsr_sync_held_from_matrix(void) {
+    memset(sharkoon_nsr_held_live, 0, sizeof(sharkoon_nsr_held_live));
+
+    for (uint8_t row = 0; row < MATRIX_ROWS; ++row) {
+        const matrix_row_t row_state = matrix_get_row(row);
+
+        for (uint8_t col = 0; col < MATRIX_COLS; ++col) {
+            if ((row_state & ((matrix_row_t)1 << col)) == 0) {
+                continue;
+            }
+
+            const uint8_t led = g_led_config.matrix_co[row][col];
+
+            if (led != NO_LED && led < RGB_MATRIX_LED_COUNT) {
+                sharkoon_nsr_set_held(led, true);
+            }
+        }
+    }
+}
+
 static inline bool sharkoon_nsr_is_held(uint8_t led) {
     return (sharkoon_nsr_held_frame[led / SHARKOON_NSR_HELD_WORD_BITS] &
             (UINT32_C(1) << (led % SHARKOON_NSR_HELD_WORD_BITS))) != 0;
@@ -115,10 +140,6 @@ static bool                 sharkoon_nsr_frame_ready;
 bool SOLID_REACTIVE(effect_params_t *params) {
     RGB_MATRIX_USE_LIMITS(led_min, led_max);
 
-#ifdef SHARKOON_PERF_BENCHMARK
-    const uint32_t perf_solid_chunk_start = sharkoon_perf_cycle_now();
-#endif
-
     /*
      * QMK can split one RGB frame over several iterations depending on
      * RGB_MATRIX_LED_PROCESS_LIMIT. Capture one timestamp for the complete
@@ -127,6 +148,7 @@ bool SOLID_REACTIVE(effect_params_t *params) {
     if (params->iter == 0 || !sharkoon_nsr_frame_ready) {
         if (params->init) {
             memset(sharkoon_nsr_state, 0, sizeof(sharkoon_nsr_state));
+            sharkoon_nsr_sync_held_from_matrix();
         }
 
         sharkoon_nsr_frame.frame_time = sync_timer_read32();
@@ -237,16 +259,6 @@ bool SOLID_REACTIVE(effect_params_t *params) {
         const rgb_t rgb = rgb_matrix_hsv_to_rgb(hsv);
         rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
     }
-
-#ifdef SHARKOON_PERF_BENCHMARK
-    const uint32_t perf_solid_chunk_cycles = sharkoon_perf_cycle_now() - perf_solid_chunk_start;
-    sharkoon_perf_accumulate(
-        &sharkoon_perf_rgb_stats.solid_chunk_sum,
-        &sharkoon_perf_rgb_stats.solid_chunk_max,
-        &sharkoon_perf_rgb_stats.solid_chunk_count,
-        perf_solid_chunk_cycles
-    );
-#endif
 
     return rgb_matrix_check_finished_leds(led_max);
 }
