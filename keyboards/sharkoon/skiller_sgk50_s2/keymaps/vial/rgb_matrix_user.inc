@@ -328,12 +328,12 @@ typedef struct {
     uint8_t sparkle_time;
     uint8_t effective_value;
     uint8_t hit_count;
-    const uint8_t *hit_falloff[LED_HITS_TO_REMEMBER];
-    uint8_t        hit_amplitude[LED_HITS_TO_REMEMBER];
+    uint8_t reactive_value[RGB_MATRIX_LED_COUNT];
 } sharkoon_hybrid_frame_t;
 
 static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
 static bool                    sharkoon_hybrid_frame_ready;
+static bool                    sharkoon_hybrid_reactive_nonzero;
 
 static void sharkoon_prepare_hybrid_frame(void) {
     sharkoon_hybrid_frame.direct_stream_active = sharkoon_direct_stream_active();
@@ -423,13 +423,24 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * REACTIVE STATE
      * =========================================================
      *
-     * Nur Hits mit tatsächlich noch sichtbarer Amplitude werden in den
-     * Frame-Snapshot übernommen. Reihenfolge und Berechnung bleiben identisch.
+     * g_last_hit_tracker is consumed exactly once per RGB frame here.
+     *
+     * First resolve the time-dependent state of at most eight hits. Then build
+     * the complete 104-byte reactive field once from the sparse non-zero
+     * source/target graph. Render chunks only read reactive_value[led]; they no
+     * longer loop over the hit tracker or over active hits.
+     *
+     * This keeps the work at the highest valid frequency:
+     *   - hit age/amplitude: once per hit per RGB frame
+     *   - spatial contribution: once per non-zero hit/LED pair per RGB frame
+     *   - render path: one byte lookup per LED
      */
     const uint8_t source_hit_count =
         g_last_hit_tracker.count < LED_HITS_TO_REMEMBER
             ? g_last_hit_tracker.count
             : LED_HITS_TO_REMEMBER;
+
+    uint16_t active_hits[LED_HITS_TO_REMEMBER];
 
     sharkoon_hybrid_frame.hit_count = 0;
 
@@ -469,12 +480,81 @@ static void sharkoon_prepare_hybrid_frame(void) {
             continue;
         }
 
-        const uint8_t dst = sharkoon_hybrid_frame.hit_count++;
-
-        sharkoon_hybrid_frame.hit_falloff[dst] =
-            sharkoon_reactive_spatial_lut[g_last_hit_tracker.index[j]];
-        sharkoon_hybrid_frame.hit_amplitude[dst] = amplitude;
+        active_hits[sharkoon_hybrid_frame.hit_count++] =
+            ((uint16_t)g_last_hit_tracker.index[j] << 8) |
+            amplitude;
     }
+
+    /*
+     * If the previous frame was already completely non-reactive, leave the
+     * zeroed field untouched. Stale QMK tracker entries therefore cost only
+     * their once-per-frame age/amplitude check and never trigger a 104-byte
+     * clear or any spatial work.
+     */
+    if (sharkoon_hybrid_frame.hit_count == 0) {
+        if (sharkoon_hybrid_reactive_nonzero) {
+            memset(
+                sharkoon_hybrid_frame.reactive_value,
+                0,
+                sizeof(sharkoon_hybrid_frame.reactive_value)
+            );
+            sharkoon_hybrid_reactive_nonzero = false;
+        }
+
+        return;
+    }
+
+    memset(
+        sharkoon_hybrid_frame.reactive_value,
+        0,
+        sizeof(sharkoon_hybrid_frame.reactive_value)
+    );
+
+    /*
+     * 3B1 accumulated active hits newest -> oldest. Keep that exact order.
+     * qadd8() is saturating; once a target reaches 255, older hits cannot
+     * change it and are skipped for that target.
+     */
+    for (uint8_t hit = sharkoon_hybrid_frame.hit_count; hit > 0; --hit) {
+        const uint16_t packed_hit = active_hits[hit - 1];
+        const uint8_t  source_led = (uint8_t)(packed_hit >> 8);
+        const uint8_t  amplitude  = (uint8_t)packed_hit;
+
+        const uint16_t pair_begin =
+            pgm_read_word(
+                &sharkoon_reactive_sparse_offsets[source_led]
+            );
+
+        const uint16_t pair_end =
+            pgm_read_word(
+                &sharkoon_reactive_sparse_offsets[source_led + 1u]
+            );
+
+        for (uint16_t pair_index = pair_begin; pair_index < pair_end; ++pair_index) {
+            const uint16_t pair =
+                pgm_read_word(
+                    &sharkoon_reactive_sparse_pairs[pair_index]
+                );
+
+            const uint8_t target_led = (uint8_t)(pair >> 8);
+            const uint8_t current    = sharkoon_hybrid_frame.reactive_value[target_led];
+
+            if (current == 255) {
+                continue;
+            }
+
+            sharkoon_hybrid_frame.reactive_value[target_led] =
+                qadd8(
+                    current,
+                    scale8(
+                        (uint8_t)pair,
+                        amplitude
+                    )
+                );
+        }
+    }
+
+    sharkoon_hybrid_reactive_nonzero = true;
 }
 
 /*
@@ -554,7 +634,6 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const uint8_t  omega             = sharkoon_hybrid_frame.omega;
     const uint8_t  sparkle_time      = sharkoon_hybrid_frame.sparkle_time;
     const uint8_t  effective_value   = sharkoon_hybrid_frame.effective_value;
-    const uint8_t  hit_count         = sharkoon_hybrid_frame.hit_count;
 
     /*
      * Genau wie vorher pro Render-Chunk neu starten, damit die Sparkle-Sequenz
@@ -666,83 +745,8 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          * 3. REACTIVE
          * =====================================================
          */
-        uint8_t reactive_value = 0;
-
-        /*
-         * LED_HITS_TO_REMEMBER is fixed at 8. Dispatch once on the current
-         * count and then fall through a fully static sequence. This keeps one
-         * implementation for every possible 0..8 hit count while removing the
-         * runtime loop counter, loop branch and variable hit-array indexing.
-         *
-         * Hits are accumulated newest-to-oldest here. qadd8() is saturating
-         * addition of non-negative contributions, so the final uint8_t result
-         * is identical to the old oldest-to-newest loop. Once 255 is reached,
-         * later contributions cannot change it and we can leave the switch.
-         */
-#        define SHARKOON_ADD_REACTIVE_HIT(hit_index)                                                   \
-            do {                                                                                       \
-                const uint8_t feathered_falloff =                                                      \
-                    pgm_read_byte(&sharkoon_hybrid_frame.hit_falloff[(hit_index)][i]);                 \
-                                                                                                       \
-                if (feathered_falloff != 0) {                                                         \
-                    reactive_value =                                                                   \
-                        qadd8(                                                                          \
-                            reactive_value,                                                            \
-                            scale8(                                                                     \
-                                feathered_falloff,                                                     \
-                                sharkoon_hybrid_frame.hit_amplitude[(hit_index)]                       \
-                            )                                                                           \
-                        );                                                                              \
-                }                                                                                      \
-            } while (0)
-
-#        if LED_HITS_TO_REMEMBER == 8
-        switch (hit_count) {
-            case 8:
-                SHARKOON_ADD_REACTIVE_HIT(7);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 7:
-                SHARKOON_ADD_REACTIVE_HIT(6);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 6:
-                SHARKOON_ADD_REACTIVE_HIT(5);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 5:
-                SHARKOON_ADD_REACTIVE_HIT(4);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 4:
-                SHARKOON_ADD_REACTIVE_HIT(3);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 3:
-                SHARKOON_ADD_REACTIVE_HIT(2);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 2:
-                SHARKOON_ADD_REACTIVE_HIT(1);
-                if (reactive_value == 255) { break; }
-                __attribute__((fallthrough));
-            case 1:
-                SHARKOON_ADD_REACTIVE_HIT(0);
-                break;
-            default:
-                break;
-        }
-#        else
-        /* Preserve compatibility if the tracker depth is changed from 8. */
-        for (uint8_t j = 0; j < hit_count; ++j) {
-            SHARKOON_ADD_REACTIVE_HIT(j);
-            if (reactive_value == 255) {
-                break;
-            }
-        }
-#        endif
-
-#        undef SHARKOON_ADD_REACTIVE_HIT
+        const uint8_t reactive_value =
+            sharkoon_hybrid_frame.reactive_value[i];
 
         if (reactive_value != 0) {
             const uint8_t reactive_white =
