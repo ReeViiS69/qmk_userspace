@@ -133,6 +133,12 @@
  * normal thread context so ISR/worker timing remains representative. */
 #define WS2812_DIAG_REPORT_MS 5000U
 
+#ifdef SHARKOON_PERF_BENCHMARK
+/* Cortex-M3 DWT cycle counter. The existing Sharkoon benchmark build already
+ * enables CYCCNT; this driver only reads the same free-running counter. */
+#    define WS2812_DWT_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
+#endif
+
 /* Double buffer for block DMA — 2 buffers give 1-block-period runway
  * (189µs at 27 ticks) which comfortably exceeds fill time (~40µs),
  * eliminating CPU/DMA data race */
@@ -173,6 +179,14 @@ static volatile uint32_t ws2812_diag_worker_timeouts;
 static volatile uint32_t ws2812_diag_forced_aborts;
 static volatile uint32_t ws2812_diag_refills;
 static uint32_t          ws2812_diag_last_report;
+
+#ifdef SHARKOON_PERF_BENCHMARK
+/* Worker-owned fill_block() timing. flush() snapshots/resets these counters
+ * under the ChibiOS system lock once per diagnostic reporting window. */
+static volatile uint32_t ws2812_diag_fill_cycles_sum;
+static volatile uint32_t ws2812_diag_fill_cycles_max;
+static volatile uint32_t ws2812_diag_fill_cycles_count;
+#endif
 
 #ifdef WS2812_DEBUG
 static volatile uint32_t ws2812_dma_error_count;    /* DMA error counter for debugging */
@@ -217,10 +231,9 @@ static inline uint32_t ws2812_get_block_size(uint32_t block) {
 static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
     for (int bit = 7; bit >= 0; bit--) {
         uint32_t bv = (byte_val >> bit) & 1;
-        /* Phase 1: always SET (go high)
+        /* Phase 1 is invariant BSRR_SET and is prefilled once in ws2812_init().
          * Phase 2: RESET if bit=0, NOP(0) if bit=1  → (1-bv) * RESET
          * Phase 3: NOP(0) if bit=0, RESET if bit=1  → bv * RESET */
-        p[0] = BSRR_SET;
         p[1] = (1 - bv) * BSRR_RESET;
         p[2] = bv * BSRR_RESET;
         p += 3;
@@ -244,6 +257,10 @@ static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
  * @param count Number of phases to fill (multiple of WS2812_PHASES_PER_LED)
  */
 static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t count) {
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_start = WS2812_DWT_CYCCNT;
+#endif
+
     uint32_t led_idx  = start_phase / WS2812_PHASES_PER_LED;
     uint32_t num_leds = count / WS2812_PHASES_PER_LED;
     uint32_t *p = buf;
@@ -256,6 +273,15 @@ static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t coun
             p = ws2812_encode_byte(p, led_data[ch]);
         }
     }
+
+#ifdef SHARKOON_PERF_BENCHMARK
+    const uint32_t perf_cycles = WS2812_DWT_CYCCNT - perf_start;
+    ws2812_diag_fill_cycles_sum += perf_cycles;
+    if (perf_cycles > ws2812_diag_fill_cycles_max) {
+        ws2812_diag_fill_cycles_max = perf_cycles;
+    }
+    ws2812_diag_fill_cycles_count++;
+#endif
 }
 
 /**
@@ -456,6 +482,14 @@ void ws2812_init(void) {
      */
     ws2812_dma_stream->dmac->Ch[ws2812_dma_stream->channel].CFGL |= WB32_DMAC_SRC_HIFS_SW;
 
+    /* Every WS2812 bit begins with the same GPIO SET word. Prefill those
+     * invariant phase-1 slots once for both reusable DMA buffers so the
+     * worker only has to encode the two data-dependent RESET phases. */
+    for (uint32_t phase = 0; phase < WS2812_BLOCK_SIZE; phase += 3) {
+        ws2812_buf[0][phase] = BSRR_SET;
+        ws2812_buf[1][phase] = BSRR_SET;
+    }
+
     ws2812_transfer_active = false;
     ws2812_worker_busy     = false;
     ws2812_buf_block[0]    = 0xFFFFFFFFU;
@@ -635,6 +669,30 @@ void ws2812_flush(void) {
             ws2812_transfer_active ? 1U : 0U,
             ws2812_worker_busy ? 1U : 0U
         );
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        uint32_t fill_sum;
+        uint32_t fill_max;
+        uint32_t fill_count;
+
+        /* Worker updates the counters in thread context. Briefly lock the
+         * scheduler while taking and resetting one coherent report window. */
+        chSysLock();
+        fill_sum   = ws2812_diag_fill_cycles_sum;
+        fill_max   = ws2812_diag_fill_cycles_max;
+        fill_count = ws2812_diag_fill_cycles_count;
+        ws2812_diag_fill_cycles_sum   = 0;
+        ws2812_diag_fill_cycles_max   = 0;
+        ws2812_diag_fill_cycles_count = 0;
+        chSysUnlock();
+
+        uprintf(
+            "WS2812 fill cyc avg/max=%lu/%lu n=%lu\r\n",
+            (unsigned long)(fill_count ? (fill_sum / fill_count) : 0U),
+            (unsigned long)fill_max,
+            (unsigned long)fill_count
+        );
+#endif
     }
 
     uint32_t start = now;
