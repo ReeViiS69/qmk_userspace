@@ -716,10 +716,14 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const bool     reactive_active   = sharkoon_hybrid_frame.hit_count != 0;
 
     /*
-     * Genau wie vorher pro Render-Chunk neu starten, damit die Sparkle-Sequenz
-     * pro LED unverändert bleibt.
+     * Sparkle only needs a cheap, visually irregular per-LED phase stream.
+     * Keep the state in a native 32-bit register and only use its low byte as
+     * the phase. The five normal render chunks start far apart on the full
+     * 256-state low-byte cycle, avoiding short repeated subsequences between
+     * neighboring chunks without any LUT or chunk-size dependency.
      */
-    uint16_t rand_state = 1 + params->iter;
+    uint32_t sparkle_state =
+        (uint8_t)(1u - ((uint8_t)params->iter << 4));
 
     /*
      * =========================================================
@@ -796,12 +800,10 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          * 2. SPARKLE
          * =====================================================
          */
-        rand_state *= UINT16_C(36563);
+        sparkle_state = sparkle_state * 17u + 29u;
 
         const uint8_t sparkle_phase =
-            (uint8_t)(
-                rand_state >> 8
-            );
+            (uint8_t)sparkle_state;
 
         const uint8_t sparkle_white =
             pgm_read_byte(
