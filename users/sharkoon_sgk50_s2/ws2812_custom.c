@@ -17,7 +17,7 @@
  * - A high-priority ChibiOS worker refills the just-released DMA buffer
  * - The ISR only chains the prepared buffer and wakes the worker; encoding
  *   never runs in interrupt context
- * - Block size 504: ≤511 hardware max, divisible by 72 (LED alignment)
+ * - Block size 504: ≤511 hardware max, divisible by 24 (wire-byte alignment)
  * - Reset: 300µs sleep in the worker after final DMA block (pin already LOW)
  *
  * Timing (3 phases per bit at 72MHz, PSC=0, ARR=WS2812_PHASE_TICKS-1):
@@ -103,21 +103,29 @@
 _Static_assert(sizeof(ws2812_led_t) == WS2812_CHANNELS,
                "ws2812_led_t must be tightly packed for linear DMA encoding");
 
-/* Buffer size calculations */
-#define WS2812_BITS_PER_LED    (WS2812_CHANNELS * 8)
-#define WS2812_PHASES_PER_BIT  3
-#define WS2812_PHASES_PER_LED  (WS2812_BITS_PER_LED * WS2812_PHASES_PER_BIT)  /* 72 phases per LED */
+/* Buffer / wire-size calculations. One color byte is always 8 bits × 3
+ * DMA phases, independent of RGB vs RGBW. */
+#define WS2812_PHASES_PER_BIT   3U
+#define WS2812_PHASES_PER_BYTE  (8U * WS2812_PHASES_PER_BIT)  /* 24 */
+#define WS2812_FRAME_BYTES      (WS2812_LED_COUNT * WS2812_CHANNELS)
 
 /* Block DMA configuration:
- * - Block size 504: ≤511 hardware max (9-bit BLOCK_TS), divisible by 72 (LED-aligned)
+ * - Block size 504: ≤511 hardware max (9-bit BLOCK_TS)
+ * - 504 is exactly 21 complete wire bytes (504 / 24)
  * - Double buffer: 2 × 504 phases = 4032 bytes
- * - Total LED phases: WS2812_LED_COUNT × 72
- * - Block count: ceil(LED_PHASES / 504)
+ * - Only the final block can be shorter than 504 phases
+ *
+ * Tracking the frame in wire bytes avoids repeatedly converting
+ * block -> phase -> LED -> byte in the worker and fill hotpaths.
  */
-#define WS2812_BLOCK_SIZE    504U
-#define WS2812_LEDS_PER_BLOCK  (WS2812_BLOCK_SIZE / WS2812_PHASES_PER_LED)  /* 7 */
-#define WS2812_LED_PHASES    (WS2812_LED_COUNT * WS2812_PHASES_PER_LED)
-#define WS2812_BLOCK_COUNT   ((WS2812_LED_PHASES + WS2812_BLOCK_SIZE - 1) / WS2812_BLOCK_SIZE)
+#define WS2812_BLOCK_SIZE        504U
+#define WS2812_BYTES_PER_BLOCK   (WS2812_BLOCK_SIZE / WS2812_PHASES_PER_BYTE)
+#define WS2812_BLOCK_COUNT       ((WS2812_FRAME_BYTES + WS2812_BYTES_PER_BLOCK - 1U) / WS2812_BYTES_PER_BLOCK)
+#define WS2812_LAST_BLOCK_BYTES  (WS2812_FRAME_BYTES - ((WS2812_BLOCK_COUNT - 1U) * WS2812_BYTES_PER_BLOCK))
+#define WS2812_LAST_BLOCK_SIZE   (WS2812_LAST_BLOCK_BYTES * WS2812_PHASES_PER_BYTE)
+
+_Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
+               "WS2812 block size must end on a wire-byte boundary");
 
 /* Reset pulse: 300µs sleep in thread context after final DMA block */
 #define WS2812_RESET_US      300U
@@ -203,7 +211,7 @@ static GPTDriver *ws2812_gpt = &WS2812_GPIO_DMA_TIMER;
 
 /* Forward declarations */
 static void ws2812_dma_callback(void *p, uint32_t flags);
-static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t count);
+static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_count);
 static void ws2812_abort_transfer(void);
 static THD_FUNCTION(ws2812_worker, arg);
 
@@ -214,14 +222,6 @@ static const GPTConfig ws2812_gpt_config = {
     .cr2       = 0,
     .dier      = WB32_TIM_DIER_UDE,  /* Enable DMA request on update */
 };
-
-/**
- * @brief Get the number of phases in a given block
- */
-static inline uint32_t ws2812_get_block_size(uint32_t block) {
-    uint32_t remaining = WS2812_LED_PHASES - (block * WS2812_BLOCK_SIZE);
-    return (remaining > WS2812_BLOCK_SIZE) ? WS2812_BLOCK_SIZE : remaining;
-}
 
 /**
  * @brief Encode one color byte into 24 phases (8 bits × 3 phases)
@@ -257,31 +257,22 @@ static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
 }
 
 /**
- * @brief Fill a buffer with encoded LED phase data (linear byte span)
+ * @brief Fill one DMA buffer from an already-resolved wire-byte span
  *
- * Block size (504) is always a multiple of phases-per-LED (72), so every
- * block starts on an LED boundary. The immutable LED snapshot is tightly
- * packed in wire-byte order, allowing one flat byte loop per block without
- * per-LED/per-channel loop control or mid-LED state tracking.
+ * The worker owns the source cursor, so this hotpath no longer has to convert
+ * a global phase offset back into an LED index. Both source and destination
+ * now advance linearly through exactly the bytes/phases being encoded.
  *
- * @param buf Pointer to buffer to fill (WS2812_BLOCK_SIZE elements)
- * @param start_phase Global phase index to start from (LED-aligned)
- * @param count Number of phases to fill (multiple of WS2812_PHASES_PER_LED)
+ * @param buf Pointer to DMA phase buffer
+ * @param src Pointer to first wire-order source byte for this block
+ * @param byte_count Number of source bytes to encode (<= WS2812_BYTES_PER_BLOCK)
  */
-static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t count) {
+static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_count) {
 #ifdef SHARKOON_PERF_BENCHMARK
     const uint32_t perf_start = WS2812_DWT_CYCCNT;
 #endif
 
-    const uint32_t led_idx    = start_phase / WS2812_PHASES_PER_LED;
-    const uint32_t num_leds   = count / WS2812_PHASES_PER_LED;
-    const uint32_t byte_count = num_leds * WS2812_CHANNELS;
-
-    /* ws2812_led_t stores exactly the wire-order color bytes contiguously.
-     * Blocks are LED-aligned, so encode the complete block as one linear byte
-     * span instead of re-entering a per-LED/per-channel nested loop. */
-    const uint8_t *src = (const uint8_t *)&ws2812_frame_leds[led_idx];
-    uint32_t       *p   = buf;
+    uint32_t *p = buf;
 
     for (uint32_t i = 0; i < byte_count; i++) {
         p = ws2812_encode_byte(p, src[i]);
@@ -404,7 +395,10 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
              * Abort instead of transmitting stale data if it ever misses the
              * ~189µs refill deadline. */
             const uint32_t buf_sel  = ws2812_block_idx % 2U;
-            const uint32_t blk_size = ws2812_get_block_size(ws2812_block_idx);
+            const uint32_t blk_size =
+                (ws2812_block_idx == (WS2812_BLOCK_COUNT - 1U))
+                    ? WS2812_LAST_BLOCK_SIZE
+                    : WS2812_BLOCK_SIZE;
 
             if (ws2812_buf_block[buf_sel] != ws2812_block_idx) {
                 ws2812_diag_underruns++;
@@ -571,15 +565,28 @@ static THD_FUNCTION(ws2812_worker, arg) {
 
         ws2812_diag_frames_started++;
 
-        /* Prepare the two-block runway before starting DMA. */
-        const uint32_t blk0_size = ws2812_get_block_size(0);
-        ws2812_fill_block(ws2812_buf[0], 0, blk0_size);
+        /* Prepare the two-block runway before starting DMA. Keep one source
+         * cursor in wire-byte space instead of reconstructing source offsets
+         * from phase/block indices for every fill. */
+        const uint8_t *next_src = (const uint8_t *)ws2812_frame_leds;
+
+        const uint32_t blk0_bytes =
+            (WS2812_BLOCK_COUNT == 1U) ? WS2812_LAST_BLOCK_BYTES
+                                       : WS2812_BYTES_PER_BLOCK;
+        const uint32_t blk0_size =
+            (WS2812_BLOCK_COUNT == 1U) ? WS2812_LAST_BLOCK_SIZE
+                                       : WS2812_BLOCK_SIZE;
+        ws2812_fill_block(ws2812_buf[0], next_src, blk0_bytes);
+        next_src += blk0_bytes;
         __DMB();
         ws2812_buf_block[0] = 0;
 
-        if (WS2812_BLOCK_COUNT > 1) {
-            const uint32_t blk1_size = ws2812_get_block_size(1);
-            ws2812_fill_block(ws2812_buf[1], WS2812_BLOCK_SIZE, blk1_size);
+        if (WS2812_BLOCK_COUNT > 1U) {
+            const uint32_t blk1_bytes =
+                (WS2812_BLOCK_COUNT == 2U) ? WS2812_LAST_BLOCK_BYTES
+                                           : WS2812_BYTES_PER_BLOCK;
+            ws2812_fill_block(ws2812_buf[1], next_src, blk1_bytes);
+            next_src += blk1_bytes;
             __DMB();
             ws2812_buf_block[1] = 1;
         }
@@ -628,12 +635,15 @@ static THD_FUNCTION(ws2812_worker, arg) {
              * also catches up if a semaphore signal was already pending. */
             while (next_fill < WS2812_BLOCK_COUNT &&
                    current >= (next_fill - 1U)) {
-                const uint32_t slot        = next_fill % 2U;
-                const uint32_t start_phase = next_fill * WS2812_BLOCK_SIZE;
-                const uint32_t size        = ws2812_get_block_size(next_fill);
+                const uint32_t slot = next_fill % 2U;
+                const uint32_t bytes =
+                    (next_fill == (WS2812_BLOCK_COUNT - 1U))
+                        ? WS2812_LAST_BLOCK_BYTES
+                        : WS2812_BYTES_PER_BLOCK;
 
                 ws2812_diag_refills++;
-                ws2812_fill_block(ws2812_buf[slot], start_phase, size);
+                ws2812_fill_block(ws2812_buf[slot], next_src, bytes);
+                next_src += bytes;
                 __DMB();
                 ws2812_buf_block[slot] = next_fill;
                 next_fill++;
