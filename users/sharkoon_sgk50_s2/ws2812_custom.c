@@ -226,21 +226,31 @@ static inline uint32_t ws2812_get_block_size(uint32_t block) {
 /**
  * @brief Encode one color byte into 24 phases (8 bits × 3 phases)
  *
- * Branchless: uses arithmetic (RSB+MUL on Cortex-M3, both 1 cycle)
- * instead of if/else branches to avoid pipeline stalls under -Os.
+ * Keep the current source bit aligned directly with the GPIO BSRR reset bit.
+ * This avoids a variable shift, bit extraction, inversion, and two scale
+ * operations for every WS2812 bit. The byte is aligned once, then advanced
+ * MSB-first with one left shift per encoded bit.
  *
  * @param p Pointer to output buffer (24 uint32_t written)
  * @param byte_val Color byte to encode (MSB first)
  * @return Pointer past the 24 written phases
  */
 static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
-    for (int bit = 7; bit >= 0; bit--) {
-        uint32_t bv = (byte_val >> bit) & 1;
+    /* byte bit 7 starts at BSRR_RESET; each left shift brings the next source
+     * bit into that same position. The cast ensures the shift is unsigned
+     * 32-bit even when WS2812_GPIO_PIN_NUM places the reset bit at bit 31. */
+    uint32_t bits = (uint32_t)byte_val << (WS2812_GPIO_PIN_NUM + 9U);
+
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        const uint32_t one = bits & BSRR_RESET;
+
         /* Phase 1 is invariant BSRR_SET and is prefilled once in ws2812_init().
-         * Phase 2: RESET if bit=0, NOP(0) if bit=1  → (1-bv) * RESET
-         * Phase 3: NOP(0) if bit=0, RESET if bit=1  → bv * RESET */
-        p[1] = (1 - bv) * BSRR_RESET;
-        p[2] = bv * BSRR_RESET;
+         * Phase 2: RESET if bit=0, NOP(0) if bit=1.
+         * Phase 3: NOP(0) if bit=0, RESET if bit=1. */
+        p[1] = BSRR_RESET ^ one;
+        p[2] = one;
+
+        bits <<= 1;
         p += 3;
     }
     return p;
