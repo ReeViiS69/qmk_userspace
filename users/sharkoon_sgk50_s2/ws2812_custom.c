@@ -98,6 +98,11 @@
 #    define WS2812_CHANNELS 3
 #endif
 
+/* Linear block encoding below relies on ws2812_led_t containing only the
+ * wire-order channel bytes, with no inter-LED padding. */
+_Static_assert(sizeof(ws2812_led_t) == WS2812_CHANNELS,
+               "ws2812_led_t must be tightly packed for linear DMA encoding");
+
 /* Buffer size calculations */
 #define WS2812_BITS_PER_LED    (WS2812_CHANNELS * 8)
 #define WS2812_PHASES_PER_BIT  3
@@ -242,15 +247,12 @@ static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
 }
 
 /**
- * @brief Fill a buffer with encoded LED phase data (per-LED, branchless)
+ * @brief Fill a buffer with encoded LED phase data (linear byte span)
  *
  * Block size (504) is always a multiple of phases-per-LED (72), so every
- * block starts on an LED boundary. This allows simple per-LED iteration
- * without mid-LED state tracking or modular arithmetic.
- *
- * Accesses LED data as raw bytes in memory order, which automatically
- * respects WS2812_BYTE_ORDER (the ws2812_led_t struct layout changes
- * with the byte order setting).
+ * block starts on an LED boundary. The immutable LED snapshot is tightly
+ * packed in wire-byte order, allowing one flat byte loop per block without
+ * per-LED/per-channel loop control or mid-LED state tracking.
  *
  * @param buf Pointer to buffer to fill (WS2812_BLOCK_SIZE elements)
  * @param start_phase Global phase index to start from (LED-aligned)
@@ -261,17 +263,18 @@ static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t coun
     const uint32_t perf_start = WS2812_DWT_CYCCNT;
 #endif
 
-    uint32_t led_idx  = start_phase / WS2812_PHASES_PER_LED;
-    uint32_t num_leds = count / WS2812_PHASES_PER_LED;
-    uint32_t *p = buf;
+    const uint32_t led_idx    = start_phase / WS2812_PHASES_PER_LED;
+    const uint32_t num_leds   = count / WS2812_PHASES_PER_LED;
+    const uint32_t byte_count = num_leds * WS2812_CHANNELS;
 
-    for (uint32_t n = 0; n < num_leds && led_idx < WS2812_LED_COUNT; n++, led_idx++) {
-        /* Access LED data as raw bytes — automatically sends bytes in
-         * the correct wire order for any WS2812_BYTE_ORDER. */
-        const uint8_t *led_data = (const uint8_t *)&ws2812_frame_leds[led_idx];
-        for (uint32_t ch = 0; ch < WS2812_CHANNELS; ch++) {
-            p = ws2812_encode_byte(p, led_data[ch]);
-        }
+    /* ws2812_led_t stores exactly the wire-order color bytes contiguously.
+     * Blocks are LED-aligned, so encode the complete block as one linear byte
+     * span instead of re-entering a per-LED/per-channel nested loop. */
+    const uint8_t *src = (const uint8_t *)&ws2812_frame_leds[led_idx];
+    uint32_t       *p   = buf;
+
+    for (uint32_t i = 0; i < byte_count; i++) {
+        p = ws2812_encode_byte(p, src[i]);
     }
 
 #ifdef SHARKOON_PERF_BENCHMARK
