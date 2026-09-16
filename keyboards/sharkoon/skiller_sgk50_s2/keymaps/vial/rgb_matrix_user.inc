@@ -347,8 +347,8 @@ static bool                    sharkoon_hybrid_reactive_wake_pending;
 /*
  * Event-side race fence only. QMK's g_last_hit_tracker remains the sole source
  * of hit identity/age. If a matching key event arrives after QMK snapshotted
- * last_hit_buffer for the current RGB frame, source-buffer compaction must wait
- * for the next frame so that newly appended hits cannot be discarded.
+ * last_hit_buffer for the current RGB frame, source-buffer compaction waits for
+ * the next source-bearing frame so that newly appended hits cannot be discarded.
  */
 void sharkoon_hybrid_reactive_process_key_event(keyrecord_t *record) {
 #    if defined(RGB_MATRIX_KEYRELEASES)
@@ -499,10 +499,13 @@ static void sharkoon_prepare_hybrid_frame(void) {
      */
     sharkoon_hybrid_frame.hit_count = 0;
 
-    const uint8_t source_hit_count       = g_last_hit_tracker.count;
-    const bool    source_mutation_fenced = sharkoon_hybrid_reactive_wake_pending;
-    sharkoon_hybrid_reactive_wake_pending = false;
+    const uint8_t source_hit_count = g_last_hit_tracker.count;
 
+    /*
+     * True idle needs no fence traffic. If an event raced a still-empty
+     * snapshot, keep the fence armed until the first source-bearing frame;
+     * that is the first frame where source compaction could matter anyway.
+     */
     if (source_hit_count == 0) {
         if (sharkoon_hybrid_reactive_nonzero) {
             memset(
@@ -514,6 +517,9 @@ static void sharkoon_prepare_hybrid_frame(void) {
         }
         return;
     }
+
+    const bool source_mutation_fenced = sharkoon_hybrid_reactive_wake_pending;
+    sharkoon_hybrid_reactive_wake_pending = false;
 
     const uint8_t reactive_scale = 1 + speed / 4;
     uint8_t       dead_prefix    = 0;
@@ -707,6 +713,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const uint8_t  omega             = sharkoon_hybrid_frame.omega;
     const uint8_t  sparkle_time      = sharkoon_hybrid_frame.sparkle_time;
     const uint8_t  effective_value   = sharkoon_hybrid_frame.effective_value;
+    const bool     reactive_active   = sharkoon_hybrid_frame.hit_count != 0;
 
     /*
      * Genau wie vorher pro Render-Chunk neu starten, damit die Sparkle-Sequenz
@@ -818,21 +825,28 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          * 3. REACTIVE
          * =====================================================
          */
-        const uint8_t reactive_value =
-            sharkoon_hybrid_frame.reactive_value[i];
+        /*
+         * hit_count is frame-constant. In true idle there is no reactive field
+         * to inspect, so avoid one array load plus the per-LED zero test.
+         * Active frames keep the exact same reactive_value path as before.
+         */
+        if (reactive_active) {
+            const uint8_t reactive_value =
+                sharkoon_hybrid_frame.reactive_value[i];
 
-        if (reactive_value != 0) {
-            const uint8_t reactive_white =
-                scale8(
-                    reactive_value,
-                    160
-                );
+            if (reactive_value != 0) {
+                const uint8_t reactive_white =
+                    scale8(
+                        reactive_value,
+                        160
+                    );
 
-            rgb =
-                sharkoon_mix_white(
-                    rgb,
-                    reactive_white
-                );
+                rgb =
+                    sharkoon_mix_white(
+                        rgb,
+                        reactive_white
+                    );
+            }
         }
 
 #ifdef SHARKOON_PERF_BENCHMARK
