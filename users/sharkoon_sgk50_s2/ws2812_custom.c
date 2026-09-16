@@ -13,9 +13,12 @@
  *
  * Architecture:
  * - Double buffer: 2 × 504 phases, ISR chains next block on TFR interrupt
- * - Fill thread pre-fills buf[0..1], then feeds remaining as ISR advances
+ * - One immutable RGB snapshot protects the in-flight frame from later writes
+ * - A high-priority ChibiOS worker refills the just-released DMA buffer
+ * - The ISR only chains the prepared buffer and wakes the worker; encoding
+ *   never runs in interrupt context
  * - Block size 504: ≤511 hardware max, divisible by 72 (LED alignment)
- * - Reset: 300µs sleep after final DMA block (pin already LOW)
+ * - Reset: 300µs sleep in the worker after final DMA block (pin already LOW)
  *
  * Timing (3 phases per bit at 72MHz, PSC=0, ARR=WS2812_PHASE_TICKS-1):
  *   Default 25 ticks = 347ns per phase (configurable via WS2812_PHASE_TICKS).
@@ -31,6 +34,8 @@
 #include "gpio.h"
 #include "timer.h"
 #include "chibios_config.h"
+
+#include <string.h>
 
 #if defined(WB32F3G71xx) || defined(WB32FQ95xx)
 
@@ -117,6 +122,11 @@
  * wireless retry/drop logic during DMA stall recovery. */
 #define WS2812_TIMEOUT_MS    5U
 
+/* The worker only owns a small call chain (wait -> fill -> encode). 512 bytes
+ * of stack is deliberately conservative while still keeping the whole async
+ * experiment below ~1 KiB of additional SRAM including the RGB snapshot. */
+#define WS2812_WORKER_STACK_SIZE 512U
+
 /* Double buffer for block DMA — 2 buffers give 1-block-period runway
  * (189µs at 27 ticks) which comfortably exceeds fill time (~40µs),
  * eliminating CPU/DMA data race */
@@ -125,13 +135,27 @@ static uint32_t ws2812_buf[2][WS2812_BLOCK_SIZE];
 /* LED color storage for ws2812_set_color API */
 ws2812_led_t ws2812_leds[WS2812_LED_COUNT];
 
+/* Immutable source for the frame currently being transmitted. QMK can update
+ * ws2812_leds[] for the next frame while DMA/worker still consume this copy. */
+static ws2812_led_t ws2812_frame_leds[WS2812_LED_COUNT];
+
+/* Worker synchronization. The DMA IRQ priority used by this driver is kernel
+ * safe, so it can signal the block semaphore through the ChibiOS I-class API. */
+static semaphore_t ws2812_start_sem;
+static semaphore_t ws2812_block_sem;
+static THD_WORKING_AREA(ws2812_worker_wa, WS2812_WORKER_STACK_SIZE);
+static thread_t *ws2812_worker_thread;
+static volatile bool ws2812_worker_busy;
+
 /* Block DMA state */
 static volatile uint32_t ws2812_block_idx;          /* Current block being DMA'd */
 static volatile bool     ws2812_transfer_active;
+static volatile uint32_t ws2812_buf_block[2];       /* Which block each buffer contains */
 static const wb32_dma_stream_t *ws2812_dma_stream;
 
 #ifdef WS2812_DEBUG
 static volatile uint32_t ws2812_dma_error_count;    /* DMA error counter for debugging */
+static volatile uint32_t ws2812_dma_underrun_count; /* Worker missed one block deadline */
 #endif
 
 /* GPT timer driver instance */
@@ -141,6 +165,7 @@ static GPTDriver *ws2812_gpt = &WS2812_GPIO_DMA_TIMER;
 static void ws2812_dma_callback(void *p, uint32_t flags);
 static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t count);
 static void ws2812_abort_transfer(void);
+static THD_FUNCTION(ws2812_worker, arg);
 
 /* Timer configuration - no callback, DMA handles transfers */
 static const GPTConfig ws2812_gpt_config = {
@@ -205,7 +230,7 @@ static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t coun
     for (uint32_t n = 0; n < num_leds && led_idx < WS2812_LED_COUNT; n++, led_idx++) {
         /* Access LED data as raw bytes — automatically sends bytes in
          * the correct wire order for any WS2812_BYTE_ORDER. */
-        const uint8_t *led_data = (const uint8_t *)&ws2812_leds[led_idx];
+        const uint8_t *led_data = (const uint8_t *)&ws2812_frame_leds[led_idx];
         for (uint32_t ch = 0; ch < WS2812_CHANNELS; ch++) {
             p = ws2812_encode_byte(p, led_data[ch]);
         }
@@ -229,6 +254,15 @@ static void ws2812_abort_transfer(void) {
     gptStopTimer(ws2812_gpt);
     WS2812_GPIO_PORT->BSRR = BSRR_RESET;
     ws2812_transfer_active = false;
+}
+
+/**
+ * @brief Wake the refill worker from DMA ISR context
+ */
+static inline void ws2812_signal_block_worker_from_isr(void) {
+    chSysLockFromISR();
+    chSemSignalI(&ws2812_block_sem);
+    chSysUnlockFromISR();
 }
 
 /**
@@ -261,6 +295,7 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
         gptStopTimerI(ws2812_gpt);
         WS2812_GPIO_PORT->BSRR = BSRR_RESET;
         ws2812_transfer_active = false;
+        ws2812_signal_block_worker_from_isr();
         return;
     }
 
@@ -272,9 +307,23 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
         ws2812_block_idx++;
 
         if (ws2812_block_idx < WS2812_BLOCK_COUNT) {
-            /* More blocks — chain next DMA transfer */
-            uint32_t buf_sel  = ws2812_block_idx % 2;
-            uint32_t blk_size = ws2812_get_block_size(ws2812_block_idx);
+            /* More blocks — the worker must already have prepared this slot.
+             * Abort instead of transmitting stale data if it ever misses the
+             * ~189µs refill deadline. */
+            const uint32_t buf_sel  = ws2812_block_idx % 2U;
+            const uint32_t blk_size = ws2812_get_block_size(ws2812_block_idx);
+
+            if (ws2812_buf_block[buf_sel] != ws2812_block_idx) {
+#ifdef WS2812_DEBUG
+                ws2812_dma_underrun_count++;
+#endif
+                dmaStreamDisable(ws2812_dma_stream);
+                gptStopTimerI(ws2812_gpt);
+                WS2812_GPIO_PORT->BSRR = BSRR_RESET;
+                ws2812_transfer_active = false;
+                ws2812_signal_block_worker_from_isr();
+                return;
+            }
 
             dmaStreamSetSource(ws2812_dma_stream, ws2812_buf[buf_sel]);
             dmaStreamSetTransactionSize(ws2812_dma_stream, blk_size);
@@ -301,6 +350,11 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
             WS2812_GPIO_PORT->BSRR = BSRR_RESET;
             ws2812_transfer_active = false;
         }
+
+        /* Wake the high-priority worker only after the next DMA block has
+         * already been chained. It can now refill the released buffer while
+         * hardware transmits the current block. */
+        ws2812_signal_block_worker_from_isr();
     }
 }
 
@@ -348,6 +402,19 @@ void ws2812_init(void) {
     ws2812_dma_stream->dmac->Ch[ws2812_dma_stream->channel].CFGL |= WB32_DMAC_SRC_HIFS_SW;
 
     ws2812_transfer_active = false;
+    ws2812_worker_busy     = false;
+    ws2812_buf_block[0]    = 0xFFFFFFFFU;
+    ws2812_buf_block[1]    = 0xFFFFFFFFU;
+
+    chSemObjectInit(&ws2812_start_sem, 0);
+    chSemObjectInit(&ws2812_block_sem, 0);
+
+    /* Run one priority above the thread that initializes the driver. This is
+     * intentional: after a DMA boundary the refill (~40µs) must complete well
+     * inside the next ~189µs block period, then the worker sleeps again. */
+    ws2812_worker_thread = chThdCreateStatic(
+        ws2812_worker_wa, sizeof(ws2812_worker_wa),
+        chThdGetPriorityX() + 1, ws2812_worker, NULL);
 }
 
 /**
@@ -382,94 +449,124 @@ void ws2812_set_color_all(uint8_t red, uint8_t green, uint8_t blue) {
 }
 
 /**
- * @brief Flush LED colors to the strip
+ * @brief Background refill worker for one immutable RGB frame
  *
- * Pre-fills double buffer, starts DMA, then feeds remaining blocks
- * from thread context as the ISR advances through them.
+ * The worker owns all phase encoding after flush() snapshots ws2812_leds[].
+ * It starts the transfer, then sleeps on a semaphore between block boundaries.
+ * The DMA ISR remains short: chain the already prepared block, signal worker,
+ * return. This keeps encoding out of interrupt context while allowing the QMK
+ * main thread to run during most of the WS2812 wire time.
+ */
+static THD_FUNCTION(ws2812_worker, arg) {
+    (void)arg;
+
+    while (true) {
+        chSemWait(&ws2812_start_sem);
+
+        /* Discard any stale boundary wakeup left by an aborted/finished frame. */
+        chSemReset(&ws2812_block_sem, 0);
+
+        /* Prepare the two-block runway before starting DMA. */
+        const uint32_t blk0_size = ws2812_get_block_size(0);
+        ws2812_fill_block(ws2812_buf[0], 0, blk0_size);
+        __DMB();
+        ws2812_buf_block[0] = 0;
+
+        if (WS2812_BLOCK_COUNT > 1) {
+            const uint32_t blk1_size = ws2812_get_block_size(1);
+            ws2812_fill_block(ws2812_buf[1], WS2812_BLOCK_SIZE, blk1_size);
+            __DMB();
+            ws2812_buf_block[1] = 1;
+        }
+
+        ws2812_block_idx       = 0;
+        ws2812_transfer_active = true;
+
+        dmaStreamSetSource(ws2812_dma_stream, ws2812_buf[0]);
+        dmaStreamSetTransactionSize(ws2812_dma_stream, blk0_size);
+
+        /* WB32/ChibiOS quirk documented by the upstream driver: disable() can
+         * clear these masks, therefore they must be restored every frame. */
+        dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_TFR);
+        dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_ERR);
+
+        /* Preserve the proven WB32 start sequence: UDE stays off across UG,
+         * then CNT/SR/DMA/UDE are armed atomically within one timer period. */
+        ws2812_gpt->tim->DIER &= ~WB32_TIM_DIER_UDE;
+        gptStartContinuous(ws2812_gpt, WS2812_PHASE_TICKS);
+        chSysDisable();
+        ws2812_gpt->tim->CNT = 0;
+        ws2812_gpt->tim->SR = 0;
+        dmaStreamEnable(ws2812_dma_stream);
+        ws2812_gpt->tim->DIER |= WB32_TIM_DIER_UDE;
+        chSysEnable();
+
+        uint32_t next_fill = 2; /* blocks 0 and 1 are already prepared */
+
+        while (ws2812_transfer_active) {
+            const msg_t msg = chSemWaitTimeout(
+                &ws2812_block_sem, TIME_MS2I(WS2812_TIMEOUT_MS));
+
+            if (msg == MSG_TIMEOUT) {
+                ws2812_abort_transfer();
+                break;
+            }
+
+            if (!ws2812_transfer_active) {
+                break;
+            }
+
+            const uint32_t current = ws2812_block_idx;
+
+            /* Normally exactly one block is filled per wakeup. The while form
+             * also catches up if a semaphore signal was already pending. */
+            while (next_fill < WS2812_BLOCK_COUNT &&
+                   current >= (next_fill - 1U)) {
+                const uint32_t slot        = next_fill % 2U;
+                const uint32_t start_phase = next_fill * WS2812_BLOCK_SIZE;
+                const uint32_t size        = ws2812_get_block_size(next_fill);
+
+                ws2812_fill_block(ws2812_buf[slot], start_phase, size);
+                __DMB();
+                ws2812_buf_block[slot] = next_fill;
+                next_fill++;
+            }
+        }
+
+        /* Final/aborted transfer leaves the pin LOW. Keep the reset interval in
+         * this sleeping worker instead of stalling the QMK main thread. */
+        chThdSleepMicroseconds(WS2812_RESET_US);
+        ws2812_worker_busy = false;
+    }
+}
+
+/**
+ * @brief Queue the current LED frame for asynchronous DMA transmission
+ *
+ * Normal RGB cadence (~16ms) is much slower than one WS2812 frame (~3ms), so
+ * the previous worker is normally already idle. If a caller does arrive early,
+ * preserve the old serialized semantics with the existing timeout rather than
+ * overwriting the snapshot of an in-flight frame.
  */
 void ws2812_flush(void) {
-    if (ws2812_dma_stream == NULL) {
+    if (ws2812_dma_stream == NULL || ws2812_worker_thread == NULL) {
         return;
     }
 
-    /* Wait for any previous transfer to complete, with safety timeout.
-     * Normal frame takes ~3ms; timeout at WS2812_TIMEOUT_MS prevents permanent
-     * lockup if DMA stalls (e.g. voltage sag, hardware glitch). */
     uint32_t start = timer_read32();
-    while (ws2812_transfer_active) {
-        if (timer_elapsed32(start) >= WS2812_TIMEOUT_MS) {
-            ws2812_abort_transfer();
-            break;
+    while (ws2812_worker_busy) {
+        if (timer_elapsed32(start) >= (WS2812_TIMEOUT_MS + 1U)) {
+            return;
         }
     }
 
-    /* Pre-fill both buffers before starting DMA */
-    uint32_t blk0_size = ws2812_get_block_size(0);
-    ws2812_fill_block(ws2812_buf[0], 0, blk0_size);
+    memcpy(ws2812_frame_leds, ws2812_leds, sizeof(ws2812_frame_leds));
 
-    if (WS2812_BLOCK_COUNT > 1) {
-        uint32_t blk1_size = ws2812_get_block_size(1);
-        ws2812_fill_block(ws2812_buf[1], WS2812_BLOCK_SIZE, blk1_size);
-    }
-
-    /* Start transfer: block 0 from buf[0] */
-    ws2812_block_idx = 0;
-    ws2812_transfer_active = true;
-
-    dmaStreamSetSource(ws2812_dma_stream, ws2812_buf[0]);
-    dmaStreamSetTransactionSize(ws2812_dma_stream, blk0_size);
-    /* Re-enable interrupt masks cleared by dmaStreamDisable() at end of previous frame */
-    dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_TFR);
-    dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_ERR);
-
-    /* Suppress both UG-triggered and stale-handshake DMA at frame start:
-     * 1. Disable UDE so gpt_lld_start_timer()'s EGR=UG can't generate DMA request
-     * 2. Start timer (UG event fires harmlessly with UDE=0)
-     * 3. With interrupts disabled: reset CNT → clear SR → arm DMA → re-enable UDE
-     *    Interrupt protection prevents ISRs from delaying the sequence past one
-     *    timer period (WS2812_PHASE_TICKS), which would allow UIF to set before UDE enable.
-     *
-     * NOTE: WB32 timer SR is rw (not rc_w0 like STM32). Writing
-     * SR = ~FLAG can SET other bits. Always use SR = 0.
-     */
-    ws2812_gpt->tim->DIER &= ~WB32_TIM_DIER_UDE;
-    gptStartContinuous(ws2812_gpt, WS2812_PHASE_TICKS);
-    chSysDisable();
-    ws2812_gpt->tim->CNT = 0;
-    ws2812_gpt->tim->SR = 0;
-    dmaStreamEnable(ws2812_dma_stream);
-    ws2812_gpt->tim->DIER |= WB32_TIM_DIER_UDE;
-    chSysEnable();
-
-    /* Feed remaining blocks from thread context.
-     * ISR chains the next block from the pre-filled buffer;
-     * we fill the just-released buffer with the block after that.
-     * 2 buffers provide 1-block-period runway (189µs at 27 ticks).
-     * Branchless fill (~40µs) stays well ahead of DMA.
-     */
-    uint32_t next_fill = 2;  /* Blocks 0–1 already filled */
-    start = timer_read32();
-
-    while (ws2812_transfer_active) {
-        if (timer_elapsed32(start) >= WS2812_TIMEOUT_MS) {
-            ws2812_abort_transfer();
-            break;
-        }
-
-        uint32_t current = ws2812_block_idx;  /* volatile read */
-
-        while (next_fill < WS2812_BLOCK_COUNT && current >= (next_fill - 1)) {
-            uint32_t start_phase = next_fill * WS2812_BLOCK_SIZE;
-            uint32_t size = ws2812_get_block_size(next_fill);
-            ws2812_fill_block(ws2812_buf[next_fill % 2], start_phase, size);
-            next_fill++;
-        }
-    }
-
-    /* WS2812 reset pulse: hold data line low for ≥280µs.
-     * Pin is already LOW (last DMA phase was RESET). Just wait.
-     */
-    chThdSleepMicroseconds(WS2812_RESET_US);
+    /* Publish the snapshot before waking the worker. chSemSignal() will allow
+     * the higher-priority worker to preempt immediately and build block 0/1. */
+    __DMB();
+    ws2812_worker_busy = true;
+    chSemSignal(&ws2812_start_sem);
 }
 
 #endif /* WB32F3G71xx || WB32FQ95xx */
