@@ -34,6 +34,7 @@
 #include "gpio.h"
 #include "timer.h"
 #include "chibios_config.h"
+#include "print.h"
 
 #include <string.h>
 
@@ -127,6 +128,11 @@
  * experiment below ~1 KiB of additional SRAM including the RGB snapshot. */
 #define WS2812_WORKER_STACK_SIZE 512U
 
+/* Diagnostic-only V6C instrumentation. It deliberately does not alter the
+ * transfer state machine. One summary line is printed every 5 seconds from
+ * normal thread context so ISR/worker timing remains representative. */
+#define WS2812_DIAG_REPORT_MS 5000U
+
 /* Double buffer for block DMA — 2 buffers give 1-block-period runway
  * (189µs at 27 ticks) which comfortably exceeds fill time (~40µs),
  * eliminating CPU/DMA data race */
@@ -152,6 +158,21 @@ static volatile uint32_t ws2812_block_idx;          /* Current block being DMA'd
 static volatile bool     ws2812_transfer_active;
 static volatile uint32_t ws2812_buf_block[2];       /* Which block each buffer contains */
 static const wb32_dma_stream_t *ws2812_dma_stream;
+
+/* Async-driver robustness counters. 32-bit aligned accesses are atomic on the
+ * Cortex-M3; exact cross-counter simultaneity is not required for diagnostics. */
+static volatile uint32_t ws2812_diag_flush_requests;
+static volatile uint32_t ws2812_diag_flush_accepted;
+static volatile uint32_t ws2812_diag_busy_seen;
+static volatile uint32_t ws2812_diag_busy_timeouts;
+static volatile uint32_t ws2812_diag_frames_started;
+static volatile uint32_t ws2812_diag_frames_completed;
+static volatile uint32_t ws2812_diag_dma_errors;
+static volatile uint32_t ws2812_diag_underruns;
+static volatile uint32_t ws2812_diag_worker_timeouts;
+static volatile uint32_t ws2812_diag_forced_aborts;
+static volatile uint32_t ws2812_diag_refills;
+static uint32_t          ws2812_diag_last_report;
 
 #ifdef WS2812_DEBUG
 static volatile uint32_t ws2812_dma_error_count;    /* DMA error counter for debugging */
@@ -240,20 +261,28 @@ static void ws2812_fill_block(uint32_t *buf, uint32_t start_phase, uint32_t coun
 /**
  * @brief Force-abort an in-progress DMA transfer (thread context only)
  *
- * Called from ws2812_flush() when a timeout is detected.
- * Stops DMA, stops timer, forces pin LOW, clears transfer flag.
+ * Called by the worker when its block-boundary wait times out. The system
+ * lock excludes the kernel-aware DMA IRQ while the hardware and shared
+ * transfer state are torn down, so a late callback cannot race the abort.
  */
 static void ws2812_abort_transfer(void) {
-    dmaStreamDisable(ws2812_dma_stream);
-    /* Clear stale raw status (TFR/ERR) from the aborted transfer.
-     * Without this, re-enabling interrupt masks on the next frame would
-     * fire a spurious TFR ISR that corrupts block sequencing.
-     * (Normal completion doesn't need this — dmaServeInterrupt() clears
-     * status at line 470 of wb32_dma.c after the callback returns.) */
-    dmaStreamClearInterrupt(ws2812_dma_stream);
-    gptStopTimer(ws2812_gpt);
-    WS2812_GPIO_PORT->BSRR = BSRR_RESET;
-    ws2812_transfer_active = false;
+    chSysLock();
+
+    /* The final DMA callback may have completed just as the semaphore wait
+     * expired. In that case there is nothing left to abort. */
+    if (ws2812_transfer_active) {
+        ws2812_diag_forced_aborts++;
+
+        /* This is an intentional abort, so clearing pending DMA status is
+         * correct here. dmaStreamDisable() also disables interrupt masks and
+         * clears raw status; the next frame restores TFR/ERR masks explicitly. */
+        dmaStreamDisable(ws2812_dma_stream);
+        gptStopTimerI(ws2812_gpt);
+        WS2812_GPIO_PORT->BSRR = BSRR_RESET;
+        ws2812_transfer_active = false;
+    }
+
+    chSysUnlock();
 }
 
 /**
@@ -262,6 +291,33 @@ static void ws2812_abort_transfer(void) {
 static inline void ws2812_signal_block_worker_from_isr(void) {
     chSysLockFromISR();
     chSemSignalI(&ws2812_block_sem);
+    chSysUnlockFromISR();
+}
+
+/**
+ * @brief Finish/abort the active frame from DMA ISR context
+ *
+ * gptStopTimerI() and chSemSignalI() are I-class APIs and therefore run under
+ * one ISR kernel lock. For normal TFR completion/underrun, do not call
+ * dmaStreamDisable(): WB32 dmaServeInterrupt() still has to inspect a possible
+ * simultaneous ERR status before it clears all DMA status at ISR exit.
+ *
+ * @param disable_dma true only when already servicing the ERR callback
+ */
+static inline void ws2812_finish_transfer_from_isr(bool disable_dma) {
+    chSysLockFromISR();
+
+    if (disable_dma) {
+        /* ERR is the last status type inspected by WB32 dmaServeInterrupt(),
+         * so clearing DMA status here cannot hide a later status check. */
+        dmaStreamDisable(ws2812_dma_stream);
+    }
+
+    gptStopTimerI(ws2812_gpt);
+    WS2812_GPIO_PORT->BSRR = BSRR_RESET;
+    ws2812_transfer_active = false;
+    chSemSignalI(&ws2812_block_sem);
+
     chSysUnlockFromISR();
 }
 
@@ -286,23 +342,21 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
      * checks it, silently losing simultaneous DMA errors.
      */
 
-    /* Error — abort */
+    /* Error — abort. WB32 dmaServeInterrupt() checks ERR after TFR, so by
+     * the time this callback runs it is safe to disable/clear the DMA stream. */
     if (flags & WB32_DMAC_IT_STATE_ERR) {
+        ws2812_diag_dma_errors++;
 #ifdef WS2812_DEBUG
         ws2812_dma_error_count++;
 #endif
-        dmaStreamDisable(ws2812_dma_stream);
-        gptStopTimerI(ws2812_gpt);
-        WS2812_GPIO_PORT->BSRR = BSRR_RESET;
-        ws2812_transfer_active = false;
-        ws2812_signal_block_worker_from_isr();
+        ws2812_finish_transfer_from_isr(true);
         return;
     }
 
-    /* TFR — block complete.
-     * Guard: dmaServeInterrupt() checks TFR before ERR and calls
-     * separately, so if both fired for the same block the ERR handler
-     * above already aborted. Skip TFR processing in that case. */
+    /* TFR — block complete. dmaServeInterrupt() invokes callbacks separately
+     * for each pending status and checks TFR before ERR. Therefore TFR paths
+     * must not clear DMA status: a simultaneous ERR still has to remain visible
+     * to dmaServeInterrupt() after this callback returns. */
     if ((flags & WB32_DMAC_IT_STATE_TFR) && ws2812_transfer_active) {
         ws2812_block_idx++;
 
@@ -314,14 +368,14 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
             const uint32_t blk_size = ws2812_get_block_size(ws2812_block_idx);
 
             if (ws2812_buf_block[buf_sel] != ws2812_block_idx) {
+                ws2812_diag_underruns++;
 #ifdef WS2812_DEBUG
                 ws2812_dma_underrun_count++;
 #endif
-                dmaStreamDisable(ws2812_dma_stream);
-                gptStopTimerI(ws2812_gpt);
-                WS2812_GPIO_PORT->BSRR = BSRR_RESET;
-                ws2812_transfer_active = false;
-                ws2812_signal_block_worker_from_isr();
+                /* The completed non-circular block is already no longer
+                 * transferring. Preserve raw DMA status so dmaServeInterrupt()
+                 * can still observe a simultaneous ERR after this TFR callback. */
+                ws2812_finish_transfer_from_isr(false);
                 return;
             }
 
@@ -344,11 +398,12 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
             ws2812_gpt->tim->DIER |= WB32_TIM_DIER_UDE;
             __enable_irq();
         } else {
-            /* All blocks sent — stop */
-            dmaStreamDisable(ws2812_dma_stream);
-            gptStopTimerI(ws2812_gpt);
-            WS2812_GPIO_PORT->BSRR = BSRR_RESET;
-            ws2812_transfer_active = false;
+            /* All blocks sent. Do not dmaStreamDisable() here: the surrounding
+             * WB32 dmaServeInterrupt() still needs to test a simultaneous ERR
+             * before it clears the pending DMA status bits. */
+            ws2812_diag_frames_completed++;
+            ws2812_finish_transfer_from_isr(false);
+            return;
         }
 
         /* Wake the high-priority worker only after the next DMA block has
@@ -405,6 +460,7 @@ void ws2812_init(void) {
     ws2812_worker_busy     = false;
     ws2812_buf_block[0]    = 0xFFFFFFFFU;
     ws2812_buf_block[1]    = 0xFFFFFFFFU;
+    ws2812_diag_last_report = timer_read32();
 
     chSemObjectInit(&ws2812_start_sem, 0);
     chSemObjectInit(&ws2812_block_sem, 0);
@@ -466,6 +522,8 @@ static THD_FUNCTION(ws2812_worker, arg) {
         /* Discard any stale boundary wakeup left by an aborted/finished frame. */
         chSemReset(&ws2812_block_sem, 0);
 
+        ws2812_diag_frames_started++;
+
         /* Prepare the two-block runway before starting DMA. */
         const uint32_t blk0_size = ws2812_get_block_size(0);
         ws2812_fill_block(ws2812_buf[0], 0, blk0_size);
@@ -508,6 +566,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
                 &ws2812_block_sem, TIME_MS2I(WS2812_TIMEOUT_MS));
 
             if (msg == MSG_TIMEOUT) {
+                ws2812_diag_worker_timeouts++;
                 ws2812_abort_transfer();
                 break;
             }
@@ -526,6 +585,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
                 const uint32_t start_phase = next_fill * WS2812_BLOCK_SIZE;
                 const uint32_t size        = ws2812_get_block_size(next_fill);
 
+                ws2812_diag_refills++;
                 ws2812_fill_block(ws2812_buf[slot], start_phase, size);
                 __DMB();
                 ws2812_buf_block[slot] = next_fill;
@@ -553,9 +613,37 @@ void ws2812_flush(void) {
         return;
     }
 
-    uint32_t start = timer_read32();
+    ws2812_diag_flush_requests++;
+
+    const uint32_t now = timer_read32();
+    if (timer_elapsed32(ws2812_diag_last_report) >= WS2812_DIAG_REPORT_MS) {
+        ws2812_diag_last_report = now;
+        uprintf(
+            "WS2812 async req=%lu ok=%lu busy=%lu drop=%lu start=%lu done=%lu "
+            "dmaerr=%lu underrun=%lu timeout=%lu abort=%lu refill=%lu active=%u worker=%u\r\n",
+            (unsigned long)ws2812_diag_flush_requests,
+            (unsigned long)ws2812_diag_flush_accepted,
+            (unsigned long)ws2812_diag_busy_seen,
+            (unsigned long)ws2812_diag_busy_timeouts,
+            (unsigned long)ws2812_diag_frames_started,
+            (unsigned long)ws2812_diag_frames_completed,
+            (unsigned long)ws2812_diag_dma_errors,
+            (unsigned long)ws2812_diag_underruns,
+            (unsigned long)ws2812_diag_worker_timeouts,
+            (unsigned long)ws2812_diag_forced_aborts,
+            (unsigned long)ws2812_diag_refills,
+            ws2812_transfer_active ? 1U : 0U,
+            ws2812_worker_busy ? 1U : 0U
+        );
+    }
+
+    uint32_t start = now;
+    if (ws2812_worker_busy) {
+        ws2812_diag_busy_seen++;
+    }
     while (ws2812_worker_busy) {
         if (timer_elapsed32(start) >= (WS2812_TIMEOUT_MS + 1U)) {
+            ws2812_diag_busy_timeouts++;
             return;
         }
     }
@@ -566,6 +654,7 @@ void ws2812_flush(void) {
      * the higher-priority worker to preempt immediately and build block 0/1. */
     __DMB();
     ws2812_worker_busy = true;
+    ws2812_diag_flush_accepted++;
     chSemSignal(&ws2812_start_sem);
 }
 
