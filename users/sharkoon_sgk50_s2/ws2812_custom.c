@@ -168,12 +168,47 @@ _Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
  * eliminating CPU/DMA data race */
 static uint32_t ws2812_buf[2][WS2812_BLOCK_SIZE];
 
-/* LED color storage for ws2812_set_color API */
-ws2812_led_t ws2812_leds[WS2812_LED_COUNT];
+/* LED color storage for ws2812_set_color API. The explicit word alignment is
+ * required by the Cortex-M3 LDM/STM snapshot fast path below. */
+ws2812_led_t ws2812_leds[WS2812_LED_COUNT] __attribute__((aligned(sizeof(uint32_t))));
 
 /* Immutable source for the frame currently being transmitted. QMK can update
- * ws2812_leds[] for the next frame while DMA/worker still consume this copy. */
-static ws2812_led_t ws2812_frame_leds[WS2812_LED_COUNT];
+ * ws2812_leds[] for the next frame while DMA/worker still consume this copy.
+ * Keep it word-aligned because LDM/STM require aligned word addresses. */
+static ws2812_led_t ws2812_frame_leds[WS2812_LED_COUNT]
+    __attribute__((aligned(sizeof(uint32_t))));
+
+/* Copy two aligned words (8 bytes) per loop iteration. For the current 104-LED
+ * RGB frame this is exactly 39 iterations (312 bytes) with no tail. Using only
+ * r2/r3 as transfer registers avoids extra callee-saved register pressure.
+ *
+ * Keep a compile-time tail fallback so the helper remains correct if a future
+ * LED/channel count is not an exact multiple of eight bytes. In the current
+ * build WS2812_FRAME_BYTES % 8 == 0, so GCC removes that path entirely. */
+static inline void ws2812_snapshot_frame(void) {
+    const uint32_t *src = (const uint32_t *)(const void *)ws2812_leds;
+    uint32_t *dst = (uint32_t *)(void *)ws2812_frame_leds;
+    uint32_t pair_count = WS2812_FRAME_BYTES / 8U;
+
+    if (pair_count != 0U) {
+        __asm__ volatile(
+            "1:\n\t"
+            "ldmia %[src]!, {r2, r3}\n\t"
+            "stmia %[dst]!, {r2, r3}\n\t"
+            "subs %[count], %[count], #1\n\t"
+            "bne 1b\n\t"
+            : [src] "+r"(src), [dst] "+r"(dst), [count] "+r"(pair_count)
+            :
+            : "r2", "r3", "cc", "memory"
+        );
+    }
+
+    if ((WS2812_FRAME_BYTES % 8U) != 0U) {
+        memcpy((uint8_t *)(void *)dst,
+               (const uint8_t *)(const void *)src,
+               WS2812_FRAME_BYTES % 8U);
+    }
+}
 
 /* Worker synchronization. The DMA IRQ priority used by this driver is kernel
  * safe, so it can signal the block semaphore through the ChibiOS I-class API. */
@@ -801,7 +836,7 @@ void ws2812_flush(void) {
         }
     }
 
-    memcpy(ws2812_frame_leds, ws2812_leds, sizeof(ws2812_frame_leds));
+    ws2812_snapshot_frame();
 
     /* Publish the snapshot before waking the worker. chSemSignal() will allow
      * the higher-priority worker to preempt immediately and build block 0/1. */
