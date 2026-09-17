@@ -649,14 +649,37 @@ bool ws2812_is_transfer_active(void) {
  * @brief Set color for a single LED
  */
 void ws2812_set_color(int index, uint8_t red, uint8_t green, uint8_t blue) {
+#ifdef WS2812_RGBW
+    /* Keep the generic RGBW path unchanged because it also performs the
+     * RGB->RGBW conversion. */
     if (index >= 0 && index < WS2812_LED_COUNT) {
         ws2812_leds[index].r = red;
         ws2812_leds[index].g = green;
         ws2812_leds[index].b = blue;
-#ifdef WS2812_RGBW
         ws2812_rgb_to_rgbw(&ws2812_leds[index]);
-#endif
     }
+#else
+    /* The four live values index/R/G/B already arrive in caller-saved
+     * r0-r3. Load the array base inside the asm into r12/ip so no fifth
+     * register operand can force GCC to spill into a callee-saved register. */
+    if ((uint32_t)index < WS2812_LED_COUNT) {
+        uint32_t idx = (uint32_t)index;
+
+        __asm__ volatile(
+            "ldr r12, =ws2812_leds\n\t"
+            "add %[idx], %[idx], %[idx], lsl #1\n\t"
+            "add %[idx], r12, %[idx]\n\t"
+            "strb %[green], [%[idx], #0]\n\t"
+            "strb %[red],   [%[idx], #1]\n\t"
+            "strb %[blue],  [%[idx], #2]\n\t"
+            : [idx] "+r"(idx)
+            : [red] "r"((uint32_t)red),
+              [green] "r"((uint32_t)green),
+              [blue] "r"((uint32_t)blue)
+            : "r12", "memory"
+        );
+    }
+#endif
 }
 
 /**
