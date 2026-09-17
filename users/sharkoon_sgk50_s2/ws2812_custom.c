@@ -470,19 +470,24 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
      * must not clear DMA status: a simultaneous ERR still has to remain visible
      * to dmaServeInterrupt() after this callback returns. */
     if ((flags & WB32_DMAC_IT_STATE_TFR) && ws2812_transfer_active) {
-        ws2812_block_idx++;
+        /* Publish the completed-block advance once, then use the local value
+         * throughout this ISR. ws2812_block_idx is volatile because the worker
+         * observes it, so repeatedly reading it would force redundant SRAM
+         * loads for the same block number. */
+        const uint32_t next_block = ws2812_block_idx + 1U;
+        ws2812_block_idx = next_block;
 
-        if (ws2812_block_idx < WS2812_BLOCK_COUNT) {
+        if (next_block < WS2812_BLOCK_COUNT) {
             /* More blocks — the worker must already have prepared this slot.
              * Abort instead of transmitting stale data if it ever misses the
              * ~189µs refill deadline. */
-            const uint32_t buf_sel  = ws2812_block_idx % 2U;
+            const uint32_t buf_sel  = next_block & 1U;
             const uint32_t blk_size =
-                (ws2812_block_idx == (WS2812_BLOCK_COUNT - 1U))
+                (next_block == (WS2812_BLOCK_COUNT - 1U))
                     ? WS2812_LAST_BLOCK_SIZE
                     : WS2812_BLOCK_SIZE;
 
-            if (ws2812_buf_block[buf_sel] != ws2812_block_idx) {
+            if (ws2812_buf_block[buf_sel] != next_block) {
                 WS2812_DIAG_INC(ws2812_diag_underruns);
 #ifdef WS2812_DEBUG
                 ws2812_dma_underrun_count++;
