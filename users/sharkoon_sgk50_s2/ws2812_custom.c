@@ -136,10 +136,11 @@ _Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
  * wireless retry/drop logic during DMA stall recovery. */
 #define WS2812_TIMEOUT_MS    5U
 
-/* The worker only owns a small call chain (wait -> fill -> encode). 512 bytes
- * of stack is deliberately conservative while still keeping the whole async
- * experiment below ~1 KiB of additional SRAM including the RGB snapshot. */
-#define WS2812_WORKER_STACK_SIZE 512U
+/* Watermark validation showed the worker touched the same 156 bytes of its
+ * ChibiOS working area with both 512-byte and 320-byte configured stacks,
+ * including Direct RGB and rapid RGB toggling. Reduce the configured stack one
+ * final conservative step to 256 bytes while retaining watermark diagnostics. */
+#define WS2812_WORKER_STACK_SIZE 256U
 
 /* Diagnostic-only V6C instrumentation. It deliberately does not alter the
  * transfer state machine. One summary line is printed every 5 seconds from
@@ -150,6 +151,12 @@ _Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
 /* Cortex-M3 DWT cycle counter. The existing Sharkoon benchmark build already
  * enables CYCCNT; this driver only reads the same free-running counter. */
 #    define WS2812_DWT_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
+
+/* Diagnostic stack watermark. This matches ChibiOS' conventional thread-stack
+ * fill byte and is only used in benchmark builds. The untouched prefix at the
+ * low end of the downward-growing Cortex-M stack is persistent high-water
+ * headroom: once the worker reaches a byte, it no longer counts as untouched. */
+#    define WS2812_STACK_FILL_VALUE 0x55U
 #endif
 
 /* Double buffer for block DMA — 2 buffers give 1-block-period runway
@@ -214,6 +221,31 @@ static void ws2812_dma_callback(void *p, uint32_t flags);
 static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_count);
 static void ws2812_abort_transfer(void);
 static THD_FUNCTION(ws2812_worker, arg);
+
+#ifdef SHARKOON_PERF_BENCHMARK
+/**
+ * @brief Return persistent low-end headroom in the worker working area
+ *
+ * The worker stack grows downward from the high end of its ChibiOS working
+ * area. ws2812_init() pre-fills the complete area before thread creation; the
+ * thread object, initial context, and every later stack high-water mark overwrite
+ * bytes from the high end downward. Scanning the still-untouched prefix therefore
+ * gives the amount by which this working area could theoretically shrink before
+ * reaching the deepest address observed so far. A real reduction must still keep
+ * an explicit safety margin.
+ */
+static uint32_t ws2812_worker_stack_untouched_bytes(void) {
+    const uint8_t *const base = (const uint8_t *)ws2812_worker_wa;
+    const uint8_t *p = base;
+    const uint8_t *const end = base + sizeof(ws2812_worker_wa);
+
+    while (p < end && *p == WS2812_STACK_FILL_VALUE) {
+        p++;
+    }
+
+    return (uint32_t)(p - base);
+}
+#endif
 
 /* Timer configuration - no callback, DMA handles transfers */
 static const GPTConfig ws2812_gpt_config = {
@@ -511,6 +543,14 @@ void ws2812_init(void) {
     chSemObjectInit(&ws2812_start_sem, 0);
     chSemObjectInit(&ws2812_block_sem, 0);
 
+#ifdef SHARKOON_PERF_BENCHMARK
+    /* Fill before chThdCreateStatic(): thread creation then lays its object and
+     * initial context over the high end, and later execution only consumes more
+     * of the pattern. This is diagnostic-only and has no steady-state hotpath
+     * cost outside the existing 5-second reporting window. */
+    memset(ws2812_worker_wa, WS2812_STACK_FILL_VALUE, sizeof(ws2812_worker_wa));
+#endif
+
     /* Run one priority above the thread that initializes the driver. This is
      * intentional: after a DMA boundary the refill (~40µs) must complete well
      * inside the next ~189µs block period, then the worker sleeps again. */
@@ -719,6 +759,15 @@ void ws2812_flush(void) {
             (unsigned long)(fill_count ? (fill_sum / fill_count) : 0U),
             (unsigned long)fill_max,
             (unsigned long)fill_count
+        );
+
+        const uint32_t stack_untouched = ws2812_worker_stack_untouched_bytes();
+        uprintf(
+            "WS2812 worker stack untouched=%lu wa=%lu cfg=%lu overhead=%lu\r\n",
+            (unsigned long)stack_untouched,
+            (unsigned long)sizeof(ws2812_worker_wa),
+            (unsigned long)WS2812_WORKER_STACK_SIZE,
+            (unsigned long)(sizeof(ws2812_worker_wa) - WS2812_WORKER_STACK_SIZE)
         );
 #endif
     }
