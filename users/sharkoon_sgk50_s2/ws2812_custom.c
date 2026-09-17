@@ -729,8 +729,8 @@ void ws2812_flush(void) {
 
     WS2812_DIAG_INC(ws2812_diag_flush_requests);
 
-    const uint32_t now = timer_read32();
 #ifdef WS2812_DIAGNOSTICS
+    const uint32_t now = timer_read32();
     if (timer_elapsed32(ws2812_diag_last_report) >= WS2812_DIAG_REPORT_MS) {
         ws2812_diag_last_report = now;
         uprintf(
@@ -786,14 +786,18 @@ void ws2812_flush(void) {
     }
 #endif /* WS2812_DIAGNOSTICS */
 
-    uint32_t start = now;
     if (ws2812_worker_busy) {
         WS2812_DIAG_INC(ws2812_diag_busy_seen);
-    }
-    while (ws2812_worker_busy) {
-        if (timer_elapsed32(start) >= (WS2812_TIMEOUT_MS + 1U)) {
-            WS2812_DIAG_INC(ws2812_diag_busy_timeouts);
-            return;
+#ifdef WS2812_DIAGNOSTICS
+        const uint32_t start = now;
+#else
+        const uint32_t start = timer_read32();
+#endif
+        while (ws2812_worker_busy) {
+            if (timer_elapsed32(start) >= (WS2812_TIMEOUT_MS + 1U)) {
+                WS2812_DIAG_INC(ws2812_diag_busy_timeouts);
+                return;
+            }
         }
     }
 
