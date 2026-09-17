@@ -126,6 +126,10 @@ _Static_assert(sizeof(ws2812_led_t) == WS2812_CHANNELS,
 
 _Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
                "WS2812 block size must end on a wire-byte boundary");
+_Static_assert(WS2812_BLOCK_SIZE <= 511U,
+               "WS2812 block size exceeds WB32 DMA BLOCK_TS limit");
+_Static_assert(WS2812_LAST_BLOCK_SIZE <= 511U,
+               "WS2812 last block exceeds WB32 DMA BLOCK_TS limit");
 
 /* Reset pulse: 300µs sleep in thread context after final DMA block */
 #define WS2812_RESET_US      300U
@@ -223,6 +227,16 @@ static volatile uint32_t ws2812_block_idx;          /* Current block being DMA'd
 static volatile bool     ws2812_transfer_active;
 static volatile uint32_t ws2812_buf_block[2];       /* Which block each buffer contains */
 static const wb32_dma_stream_t *ws2812_dma_stream;
+
+/* Cached WB32 DMA MMIO targets. The stream/controller/channel never change
+ * after init, so resolving descriptor -> DMAC -> channel on every block
+ * boundary is redundant ISR work. Keep the register targets volatile so the
+ * compiler preserves the exact MMIO writes and ordering of the proven start
+ * sequence. */
+static volatile uint32_t *ws2812_dma_sar_reg;
+static volatile uint32_t *ws2812_dma_ctlh_reg;
+static volatile uint32_t *ws2812_dma_chen_reg;
+static uint32_t           ws2812_dma_enable_value;
 
 #ifdef WS2812_DIAGNOSTICS
 /* Async-driver robustness counters. 32-bit aligned accesses are atomic on the
@@ -499,8 +513,8 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
                 return;
             }
 
-            dmaStreamSetSource(ws2812_dma_stream, ws2812_buf[buf_sel]);
-            dmaStreamSetTransactionSize(ws2812_dma_stream, blk_size);
+            *ws2812_dma_sar_reg  = (uint32_t)ws2812_buf[buf_sel];
+            *ws2812_dma_ctlh_reg = blk_size & WB32_DMA_CHCFG_SIZE_MASK;
             /* Prevent stale timer UIF from triggering an immediate DMA
              * transfer with wrong phase timing at block boundaries.
              * Interrupt-protected: CNT reset → SR clear → arm DMA → UDE enable
@@ -514,7 +528,7 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
             __disable_irq();
             ws2812_gpt->tim->CNT = 0;
             ws2812_gpt->tim->SR = 0;
-            dmaStreamEnable(ws2812_dma_stream);
+            *ws2812_dma_chen_reg = ws2812_dma_enable_value;
             ws2812_gpt->tim->DIER |= WB32_TIM_DIER_UDE;
             __enable_irq();
         } else {
@@ -552,6 +566,18 @@ void ws2812_init(void) {
     if (ws2812_dma_stream == NULL) {
         return;
     }
+
+    /* Cache the immutable WB32 DMA register targets once. ChibiOS' WB32
+     * dmaStreamSetSource(), dmaStreamSetTransactionSize() and
+     * dmaStreamEnable() macros ultimately perform these same MMIO writes, but
+     * otherwise re-resolve dmac/channel and rebuild the enable mask on every
+     * block boundary. */
+    const uint32_t dma_channel = ws2812_dma_stream->channel;
+    const uint32_t dma_mask    = 1U << dma_channel;
+    ws2812_dma_sar_reg         = &ws2812_dma_stream->dmac->Ch[dma_channel].SAR;
+    ws2812_dma_ctlh_reg        = &ws2812_dma_stream->dmac->Ch[dma_channel].CTLH;
+    ws2812_dma_chen_reg        = &ws2812_dma_stream->dmac->ChEnReg;
+    ws2812_dma_enable_value    = (dma_mask << 8) | dma_mask;
 
     /* Configure DMA mode: Memory -> Peripheral (GPIO BSRR)
      * Non-circular, TFR interrupt for block chaining, error interrupt.
@@ -691,8 +717,8 @@ static THD_FUNCTION(ws2812_worker, arg) {
         ws2812_block_idx       = 0;
         ws2812_transfer_active = true;
 
-        dmaStreamSetSource(ws2812_dma_stream, ws2812_buf[0]);
-        dmaStreamSetTransactionSize(ws2812_dma_stream, blk0_size);
+        *ws2812_dma_sar_reg  = (uint32_t)ws2812_buf[0];
+        *ws2812_dma_ctlh_reg = blk0_size & WB32_DMA_CHCFG_SIZE_MASK;
 
         /* WB32/ChibiOS quirk documented by the upstream driver: disable() can
          * clear these masks, therefore they must be restored every frame. */
@@ -706,7 +732,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
         chSysDisable();
         ws2812_gpt->tim->CNT = 0;
         ws2812_gpt->tim->SR = 0;
-        dmaStreamEnable(ws2812_dma_stream);
+        *ws2812_dma_chen_reg = ws2812_dma_enable_value;
         ws2812_gpt->tim->DIER |= WB32_TIM_DIER_UDE;
         chSysEnable();
 
