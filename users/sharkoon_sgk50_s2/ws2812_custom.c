@@ -238,21 +238,26 @@ static const GPTConfig ws2812_gpt_config = {
 static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
     /* byte bit 7 starts at BSRR_RESET; each left shift brings the next source
      * bit into that same position. The cast ensures the shift is unsigned
-     * 32-bit even when WS2812_GPIO_PIN_NUM places the reset bit at bit 31. */
+     * 32-bit even when WS2812_GPIO_PIN_NUM places the reset bit at bit 31.
+     *
+     * GCC's normal cost model keeps this fixed eight-iteration loop rolled,
+     * which adds hotpath branch/pointer bookkeeping and preserves a serial
+     * shift dependency. Explicitly request full unrolling so GCC can fold the
+     * eight constant steps into fixed shifts/offsets while the source remains
+     * compact and maintainable. */
     uint32_t bits = (uint32_t)byte_val << (WS2812_GPIO_PIN_NUM + 9U);
 
-    for (uint8_t bit = 0; bit < 8; bit++) {
+#pragma GCC unroll 8
+    for (uint32_t bit = 0; bit < 8U; bit++) {
         const uint32_t one = bits & BSRR_RESET;
 
-        /* Phase 1 is invariant BSRR_SET and is prefilled once in ws2812_init().
-         * Phase 2: RESET if bit=0, NOP(0) if bit=1.
-         * Phase 3: NOP(0) if bit=0, RESET if bit=1. */
         p[1] = BSRR_RESET ^ one;
         p[2] = one;
 
         bits <<= 1;
         p += 3;
     }
+
     return p;
 }
 
