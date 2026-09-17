@@ -138,16 +138,20 @@ _Static_assert((WS2812_BLOCK_SIZE % WS2812_PHASES_PER_BYTE) == 0U,
 
 /* Watermark validation showed the worker touched the same 156 bytes of its
  * ChibiOS working area with both 512-byte and 320-byte configured stacks,
- * including Direct RGB and rapid RGB toggling. Reduce the configured stack one
- * final conservative step to 256 bytes while retaining watermark diagnostics. */
+ * including Direct RGB and rapid RGB toggling. 256 bytes keeps a conservative
+ * production margin; watermark instrumentation remains available when enabled. */
 #define WS2812_WORKER_STACK_SIZE 256U
 
-/* Diagnostic-only V6C instrumentation. It deliberately does not alter the
- * transfer state machine. One summary line is printed every 5 seconds from
- * normal thread context so ISR/worker timing remains representative. */
-#define WS2812_DIAG_REPORT_MS 5000U
+/* Optional driver diagnostics. Production builds leave WS2812_DIAGNOSTICS
+ * undefined, compiling out counters, periodic uprintf() traffic, DWT timing,
+ * and stack-watermark instrumentation. Define WS2812_DIAGNOSTICS in config.h
+ * (or via OPT_DEFS) when validating the async driver. SHARKOON_PERF_BENCHMARK
+ * additionally enables the DWT fill timing + stack watermark inside that mode. */
+#ifdef WS2812_DIAGNOSTICS
+#    define WS2812_DIAG_REPORT_MS 5000U
+#endif
 
-#ifdef SHARKOON_PERF_BENCHMARK
+#if defined(WS2812_DIAGNOSTICS) && defined(SHARKOON_PERF_BENCHMARK)
 /* Cortex-M3 DWT cycle counter. The existing Sharkoon benchmark build already
  * enables CYCCNT; this driver only reads the same free-running counter. */
 #    define WS2812_DWT_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
@@ -185,6 +189,7 @@ static volatile bool     ws2812_transfer_active;
 static volatile uint32_t ws2812_buf_block[2];       /* Which block each buffer contains */
 static const wb32_dma_stream_t *ws2812_dma_stream;
 
+#ifdef WS2812_DIAGNOSTICS
 /* Async-driver robustness counters. 32-bit aligned accesses are atomic on the
  * Cortex-M3; exact cross-counter simultaneity is not required for diagnostics. */
 static volatile uint32_t ws2812_diag_flush_requests;
@@ -200,12 +205,17 @@ static volatile uint32_t ws2812_diag_forced_aborts;
 static volatile uint32_t ws2812_diag_refills;
 static uint32_t          ws2812_diag_last_report;
 
-#ifdef SHARKOON_PERF_BENCHMARK
+#    define WS2812_DIAG_INC(counter) ((counter)++)
+
+#    ifdef SHARKOON_PERF_BENCHMARK
 /* Worker-owned fill_block() timing. flush() snapshots/resets these counters
  * under the ChibiOS system lock once per diagnostic reporting window. */
 static volatile uint32_t ws2812_diag_fill_cycles_sum;
 static volatile uint32_t ws2812_diag_fill_cycles_max;
 static volatile uint32_t ws2812_diag_fill_cycles_count;
+#    endif
+#else
+#    define WS2812_DIAG_INC(counter) ((void)0)
 #endif
 
 #ifdef WS2812_DEBUG
@@ -222,7 +232,7 @@ static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_c
 static void ws2812_abort_transfer(void);
 static THD_FUNCTION(ws2812_worker, arg);
 
-#ifdef SHARKOON_PERF_BENCHMARK
+#if defined(WS2812_DIAGNOSTICS) && defined(SHARKOON_PERF_BENCHMARK)
 /**
  * @brief Return persistent low-end headroom in the worker working area
  *
@@ -305,7 +315,7 @@ static inline uint32_t *ws2812_encode_byte(uint32_t *p, uint8_t byte_val) {
  * @param byte_count Number of source bytes to encode (<= WS2812_BYTES_PER_BLOCK)
  */
 static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_count) {
-#ifdef SHARKOON_PERF_BENCHMARK
+#if defined(WS2812_DIAGNOSTICS) && defined(SHARKOON_PERF_BENCHMARK)
     const uint32_t perf_start = WS2812_DWT_CYCCNT;
 #endif
 
@@ -315,7 +325,7 @@ static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_c
         p = ws2812_encode_byte(p, src[i]);
     }
 
-#ifdef SHARKOON_PERF_BENCHMARK
+#if defined(WS2812_DIAGNOSTICS) && defined(SHARKOON_PERF_BENCHMARK)
     const uint32_t perf_cycles = WS2812_DWT_CYCCNT - perf_start;
     ws2812_diag_fill_cycles_sum += perf_cycles;
     if (perf_cycles > ws2812_diag_fill_cycles_max) {
@@ -338,7 +348,7 @@ static void ws2812_abort_transfer(void) {
     /* The final DMA callback may have completed just as the semaphore wait
      * expired. In that case there is nothing left to abort. */
     if (ws2812_transfer_active) {
-        ws2812_diag_forced_aborts++;
+        WS2812_DIAG_INC(ws2812_diag_forced_aborts);
 
         /* This is an intentional abort, so clearing pending DMA status is
          * correct here. dmaStreamDisable() also disables interrupt masks and
@@ -412,7 +422,7 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
     /* Error — abort. WB32 dmaServeInterrupt() checks ERR after TFR, so by
      * the time this callback runs it is safe to disable/clear the DMA stream. */
     if (flags & WB32_DMAC_IT_STATE_ERR) {
-        ws2812_diag_dma_errors++;
+        WS2812_DIAG_INC(ws2812_diag_dma_errors);
 #ifdef WS2812_DEBUG
         ws2812_dma_error_count++;
 #endif
@@ -438,7 +448,7 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
                     : WS2812_BLOCK_SIZE;
 
             if (ws2812_buf_block[buf_sel] != ws2812_block_idx) {
-                ws2812_diag_underruns++;
+                WS2812_DIAG_INC(ws2812_diag_underruns);
 #ifdef WS2812_DEBUG
                 ws2812_dma_underrun_count++;
 #endif
@@ -471,7 +481,7 @@ static void ws2812_dma_callback(void *p, uint32_t flags) {
             /* All blocks sent. Do not dmaStreamDisable() here: the surrounding
              * WB32 dmaServeInterrupt() still needs to test a simultaneous ERR
              * before it clears the pending DMA status bits. */
-            ws2812_diag_frames_completed++;
+            WS2812_DIAG_INC(ws2812_diag_frames_completed);
             ws2812_finish_transfer_from_isr(false);
             return;
         }
@@ -538,12 +548,14 @@ void ws2812_init(void) {
     ws2812_worker_busy     = false;
     ws2812_buf_block[0]    = 0xFFFFFFFFU;
     ws2812_buf_block[1]    = 0xFFFFFFFFU;
+#ifdef WS2812_DIAGNOSTICS
     ws2812_diag_last_report = timer_read32();
+#endif
 
     chSemObjectInit(&ws2812_start_sem, 0);
     chSemObjectInit(&ws2812_block_sem, 0);
 
-#ifdef SHARKOON_PERF_BENCHMARK
+#if defined(WS2812_DIAGNOSTICS) && defined(SHARKOON_PERF_BENCHMARK)
     /* Fill before chThdCreateStatic(): thread creation then lays its object and
      * initial context over the high end, and later execution only consumes more
      * of the pattern. This is diagnostic-only and has no steady-state hotpath
@@ -608,7 +620,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
         /* Discard any stale boundary wakeup left by an aborted/finished frame. */
         chSemReset(&ws2812_block_sem, 0);
 
-        ws2812_diag_frames_started++;
+        WS2812_DIAG_INC(ws2812_diag_frames_started);
 
         /* Prepare the two-block runway before starting DMA. Keep one source
          * cursor in wire-byte space instead of reconstructing source offsets
@@ -665,7 +677,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
                 &ws2812_block_sem, TIME_MS2I(WS2812_TIMEOUT_MS));
 
             if (msg == MSG_TIMEOUT) {
-                ws2812_diag_worker_timeouts++;
+                WS2812_DIAG_INC(ws2812_diag_worker_timeouts);
                 ws2812_abort_transfer();
                 break;
             }
@@ -686,7 +698,7 @@ static THD_FUNCTION(ws2812_worker, arg) {
                         ? WS2812_LAST_BLOCK_BYTES
                         : WS2812_BYTES_PER_BLOCK;
 
-                ws2812_diag_refills++;
+                WS2812_DIAG_INC(ws2812_diag_refills);
                 ws2812_fill_block(ws2812_buf[slot], next_src, bytes);
                 next_src += bytes;
                 __DMB();
@@ -715,9 +727,10 @@ void ws2812_flush(void) {
         return;
     }
 
-    ws2812_diag_flush_requests++;
+    WS2812_DIAG_INC(ws2812_diag_flush_requests);
 
     const uint32_t now = timer_read32();
+#ifdef WS2812_DIAGNOSTICS
     if (timer_elapsed32(ws2812_diag_last_report) >= WS2812_DIAG_REPORT_MS) {
         ws2812_diag_last_report = now;
         uprintf(
@@ -771,14 +784,15 @@ void ws2812_flush(void) {
         );
 #endif
     }
+#endif /* WS2812_DIAGNOSTICS */
 
     uint32_t start = now;
     if (ws2812_worker_busy) {
-        ws2812_diag_busy_seen++;
+        WS2812_DIAG_INC(ws2812_diag_busy_seen);
     }
     while (ws2812_worker_busy) {
         if (timer_elapsed32(start) >= (WS2812_TIMEOUT_MS + 1U)) {
-            ws2812_diag_busy_timeouts++;
+            WS2812_DIAG_INC(ws2812_diag_busy_timeouts);
             return;
         }
     }
@@ -789,7 +803,7 @@ void ws2812_flush(void) {
      * the higher-priority worker to preempt immediately and build block 0/1. */
     __DMB();
     ws2812_worker_busy = true;
-    ws2812_diag_flush_accepted++;
+    WS2812_DIAG_INC(ws2812_diag_flush_accepted);
     chSemSignal(&ws2812_start_sem);
 }
 
