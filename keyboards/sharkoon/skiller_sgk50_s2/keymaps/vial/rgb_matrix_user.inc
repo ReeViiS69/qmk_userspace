@@ -40,6 +40,8 @@ void sharkoon_perf_rgb_take_snapshot(sharkoon_perf_rgb_stats_t *out) {
 
 #ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
 
+#include "led_tables.h"
+
 extern hsv_t g_direct_mode_colors[RGB_MATRIX_LED_COUNT];
 bool sharkoon_direct_stream_active(void);
 
@@ -88,6 +90,54 @@ static last_hit_t last_hit_buffer;
 static rgb_t sharkoon_direct_rgb_cache[RGB_MATRIX_LED_COUNT];
 
 /*
+ * DirectRGB-specialized HSV -> RGB conversion. This is intentionally kept
+ * local to the packet hotpath; normal QMK/Hybrid effects continue to use
+ * rgb_matrix_hsv_to_rgb() unchanged.
+ *
+ * QMK computes region = h * 6 / 255. For h in [0,255], division by 255 is
+ * exactly equivalent to:
+ *
+ *   x = h * 6;
+ *   region = (x + 1 + (x >> 8)) >> 8;
+ *
+ * That removes the UDIV emitted by GCC on every streamed LED while preserving
+ * the exact QMK region/remainder and CIE1931 brightness semantics.
+ */
+static inline __attribute__((always_inline)) rgb_t sharkoon_direct_hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v) {
+#    ifdef USE_CIE1931_CURVE
+    v = pgm_read_byte(&CIE1931_CURVE[v]);
+#    endif
+
+    if (s == 0) {
+        return (rgb_t){v, v, v};
+    }
+
+    const uint16_t h6 = (uint16_t)h * 6u;
+    const uint8_t region = (uint8_t)((h6 + 1u + (h6 >> 8)) >> 8);
+    const uint8_t remainder = (uint8_t)(h6 - ((uint16_t)region * 255u));
+
+    const uint8_t p = (uint8_t)(((uint16_t)v * (255u - s)) >> 8);
+    const uint8_t q = (uint8_t)(((uint16_t)v * (255u - (((uint16_t)s * remainder) >> 8))) >> 8);
+    const uint8_t t = (uint8_t)(((uint16_t)v * (255u - (((uint16_t)s * (255u - remainder)) >> 8))) >> 8);
+
+    switch (region) {
+        case 6:
+        case 0:
+            return (rgb_t){v, t, p};
+        case 1:
+            return (rgb_t){q, v, p};
+        case 2:
+            return (rgb_t){p, v, t};
+        case 3:
+            return (rgb_t){p, q, v};
+        case 4:
+            return (rgb_t){t, p, v};
+        default:
+            return (rgb_t){v, p, q};
+    }
+}
+
+/*
  * Called from via_command_kb() before Vial processes the packet. The packet
  * format is: command, subcommand, first LED lo/hi, count, then count * HSV.
  * Rendering cannot run until the VIA command returns, and Vial writes the same
@@ -115,15 +165,12 @@ void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length) {
 
     for (uint16_t led = first_index; led < end; ++led, src += 3) {
         const uint8_t raw_v = src[2];
-        const hsv_t hsv = {
-            .h = src[0],
-            .s = src[1],
-            .v = raw_v > RGB_MATRIX_MAXIMUM_BRIGHTNESS
-                     ? RGB_MATRIX_MAXIMUM_BRIGHTNESS
-                     : raw_v,
-        };
+        const uint8_t value = raw_v > RGB_MATRIX_MAXIMUM_BRIGHTNESS
+                                  ? RGB_MATRIX_MAXIMUM_BRIGHTNESS
+                                  : raw_v;
 
-        sharkoon_direct_rgb_cache[led] = rgb_matrix_hsv_to_rgb(hsv);
+        sharkoon_direct_rgb_cache[led] =
+            sharkoon_direct_hsv_to_rgb(src[0], src[1], value);
 
 #ifdef SHARKOON_PERF_BENCHMARK
         ++sharkoon_perf_rgb_stats.direct_cache_misses;
