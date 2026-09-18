@@ -65,47 +65,33 @@ static last_hit_t last_hit_buffer;
 
 #define SHARKOON_PALETTE_COLOR_COUNT 16u
 #define SHARKOON_FLOW_COLOR_COUNT    128u
-#define SHARKOON_DIRECT_DIRTY_WORDS  ((RGB_MATRIX_LED_COUNT + 31u) / 32u)
 
 /*
  * =============================================================
  * VIAL DIRECT RGB CACHE
  * =============================================================
  *
- * Vial stores Direct colors as HSV. Convert only LEDs whose HSV values were
- * changed by a vialrgb_direct_fastset packet instead of converting every LED
- * again on every rendered Direct frame.
+ * DirectRGB hosts normally stream continuously. Convert each packet's HSV
+ * values to RGB immediately in the existing VIA observation hook so the RGB
+ * render hotpath only has to load the cached RGB value.
+ *
+ * No separate cache initialization is needed: both g_direct_mode_colors[] and
+ * this cache start as zero-initialized BSS. Every Direct packet updates both
+ * states with the same clamped HSV value, so untouched LEDs remain synchronized
+ * even when the first packet is only a partial update.
+ *
+ * Keep the existing public hook/counter names intentionally. Besides minimizing
+ * unrelated LTO churn in this benchmark round, direct_cache_misses continues to
+ * count the same event as before: one HSV->RGB conversion caused by a Direct
+ * update.
  */
-static rgb_t    sharkoon_direct_rgb_cache[RGB_MATRIX_LED_COUNT];
-static uint32_t sharkoon_direct_dirty[SHARKOON_DIRECT_DIRTY_WORDS];
-static bool     sharkoon_direct_cache_initialized;
-
-static inline void sharkoon_direct_mark_dirty(uint8_t led) {
-    sharkoon_direct_dirty[led >> 5] |= UINT32_C(1) << (led & 31u);
-}
-
-static inline bool sharkoon_direct_is_dirty(uint8_t led) {
-    return (sharkoon_direct_dirty[led >> 5] & (UINT32_C(1) << (led & 31u))) != 0;
-}
-
-static inline void sharkoon_direct_clear_dirty(uint8_t led) {
-    sharkoon_direct_dirty[led >> 5] &= ~(UINT32_C(1) << (led & 31u));
-}
-
-static void sharkoon_direct_prepare_cache(void) {
-    if (sharkoon_direct_cache_initialized) {
-        return;
-    }
-
-    memset(sharkoon_direct_dirty, 0xFF, sizeof(sharkoon_direct_dirty));
-    sharkoon_direct_cache_initialized = true;
-}
+static rgb_t sharkoon_direct_rgb_cache[RGB_MATRIX_LED_COUNT];
 
 /*
  * Called from via_command_kb() before Vial processes the packet. The packet
  * format is: command, subcommand, first LED lo/hi, count, then count * HSV.
- * Marking before the core write is safe because rendering cannot run until the
- * VIA command returns and the new g_direct_mode_colors[] values are in place.
+ * Rendering cannot run until the VIA command returns, and Vial writes the same
+ * clamped HSV values to g_direct_mode_colors[] immediately afterwards.
  */
 void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length) {
     if (length < 5) {
@@ -125,24 +111,27 @@ void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length) {
         end = RGB_MATRIX_LED_COUNT;
     }
 
-    for (uint16_t led = first_index; led < end; ++led) {
-        sharkoon_direct_mark_dirty((uint8_t)led);
+    const uint8_t *src = &data[5];
+
+    for (uint16_t led = first_index; led < end; ++led, src += 3) {
+        const uint8_t raw_v = src[2];
+        const hsv_t hsv = {
+            .h = src[0],
+            .s = src[1],
+            .v = raw_v > RGB_MATRIX_MAXIMUM_BRIGHTNESS
+                     ? RGB_MATRIX_MAXIMUM_BRIGHTNESS
+                     : raw_v,
+        };
+
+        sharkoon_direct_rgb_cache[led] = rgb_matrix_hsv_to_rgb(hsv);
+
+#ifdef SHARKOON_PERF_BENCHMARK
+        ++sharkoon_perf_rgb_stats.direct_cache_misses;
+#endif
     }
 }
 
 static inline rgb_t sharkoon_direct_get_rgb(uint8_t led) {
-    if (sharkoon_direct_is_dirty(led)) {
-#ifdef SHARKOON_PERF_BENCHMARK
-        ++sharkoon_perf_rgb_stats.direct_cache_misses;
-#endif
-        sharkoon_direct_rgb_cache[led] =
-            rgb_matrix_hsv_to_rgb(
-                g_direct_mode_colors[led]
-            );
-
-        sharkoon_direct_clear_dirty(led);
-    }
-
     return sharkoon_direct_rgb_cache[led];
 }
 
@@ -407,7 +396,6 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * gebraucht. Den Snapshot erst vorbereiten, wenn tatsächlich gerendert wird.
      */
     if (sharkoon_hybrid_frame.direct_stream_active) {
-        sharkoon_direct_prepare_cache();
         return;
     }
 
