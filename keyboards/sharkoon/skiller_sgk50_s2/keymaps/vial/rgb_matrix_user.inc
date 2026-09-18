@@ -46,6 +46,14 @@ extern hsv_t g_direct_mode_colors[RGB_MATRIX_LED_COUNT];
 bool sharkoon_direct_stream_active(void);
 
 /*
+ * This keyboard is a non-split RGB matrix using the custom WS2812 driver.
+ * In the accepted V3 ELF, rgb_matrix_set_color() is only a tail branch to
+ * ws2812_set_color(), so calling the driver directly preserves the exact
+ * color-write semantics while removing one branch from every rendered LED.
+ */
+void ws2812_set_color(int index, uint8_t red, uint8_t green, uint8_t blue);
+
+/*
  * Wenn das nicht definiert ist, kann unser Effekt niemals
  * auf Tastendrücke reagieren. Lieber beim Compile sofort
  * auffallen lassen, statt stillschweigend nicht zu funktionieren.
@@ -722,7 +730,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
         for (uint8_t i = led_min; i < led_max; ++i) {
             const rgb_t rgb = sharkoon_direct_get_rgb(i);
 
-            rgb_matrix_set_color(
+            ws2812_set_color(
                 i,
                 rgb.r,
                 rgb.g,
@@ -932,7 +940,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          * OUTPUT
          * =====================================================
          */
-        rgb_matrix_set_color(
+        ws2812_set_color(
             i,
             rgb.r,
             rgb.g,
