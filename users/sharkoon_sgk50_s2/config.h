@@ -1,5 +1,16 @@
 #pragma once
-#define DEBUG_MATRIX_SCAN_RATE
+
+/*
+ * Optional diagnostics / performance instrumentation.
+ * Production builds keep all of these undefined.
+ *
+ * If SHARKOON_PERF_BENCHMARK is enabled for measurements, also switch
+ * CONSOLE_ENABLE to yes in users/sharkoon_sgk50_s2/rules.mk.
+ */
+// #define SHARKOON_PERF_BENCHMARK
+// #define DEBUG_MATRIX_SCAN_RATE
+// #define WS2812_DIAGNOSTICS
+// #define WS2812_DEBUG
 /*
  * Storage layout for this confirmed SGK50 S2 hardware:
  * - WB32FQ95xC: 256 KiB internal flash / 36 KiB SRAM

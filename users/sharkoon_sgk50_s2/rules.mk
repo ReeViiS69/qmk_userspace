@@ -22,5 +22,8 @@ CAPS_WORD_ENABLE = yes
 
 LAYER_LOCK_ENABLE = yes
 REPEAT_KEY_ENABLE = yes
-CONSOLE_ENABLE = yes
-KEYBOARD_SHARED_EP = yes
+
+# Production default: no QMK console/debug transport.
+# Set this to yes only when SHARKOON_PERF_BENCHMARK is enabled.
+CONSOLE_ENABLE = no
+KEYBOARD_SHARED_EP = no

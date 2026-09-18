@@ -9,6 +9,7 @@
  */
 #undef SOLID_REACTIVE
 
+#include "matrix.h"
 #include "sync_timer.h"
 
 #include <stdint.h>

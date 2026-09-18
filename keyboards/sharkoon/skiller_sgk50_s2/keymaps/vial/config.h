@@ -17,9 +17,3 @@
 
 #define RGB_MATRIX_DEFAULT_MODE RGB_MATRIX_CUSTOM_VIALRGB_DIRECT
 
-/*
- * Temporary on-device performance instrumentation.
- * Remove this define after before/after measurements are complete.
- */
-#define SHARKOON_PERF_BENCHMARK
-#define DEBUG_MATRIX_SCAN_RATE
