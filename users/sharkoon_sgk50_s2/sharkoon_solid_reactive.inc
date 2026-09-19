@@ -11,9 +11,31 @@
 
 #include "matrix.h"
 #include "sync_timer.h"
+#include "ws2812.h"
 
 #include <stdint.h>
 #include <string.h>
+
+/*
+ * Solid Reactive runs on the same fixed RGB-only SGK50 S2 WS2812 backend as
+ * the proven Direct/Hybrid fast path. Write the driver's pending-frame buffer
+ * directly so each LED avoids rgb_matrix_set_color() -> ws2812_set_color(),
+ * its bounds check, and repeated index * 3 address reconstruction.
+ *
+ * ws2812_flush() still snapshots ws2812_leds[] later, so worker/DMA ownership
+ * and frame timing remain unchanged. Keep the path fail-closed for RGBW or any
+ * future LED-count/layout mismatch.
+ */
+#ifdef WS2812_RGBW
+#    error "SHARKOON Solid Reactive direct WS2812 path requires RGB-only LEDs"
+#endif
+
+_Static_assert(WS2812_LED_COUNT == RGB_MATRIX_LED_COUNT,
+               "SHARKOON Solid Reactive direct WS2812 path requires a 1:1 RGB matrix/driver LED mapping");
+_Static_assert(sizeof(ws2812_led_t) == 3u,
+               "SHARKOON Solid Reactive direct WS2812 path requires packed 3-byte RGB LEDs");
+
+extern ws2812_led_t ws2812_leds[WS2812_LED_COUNT];
 
 #define SHARKOON_NSR_IDLE              0u
 #define SHARKOON_NSR_HELD              UINT32_MAX
@@ -189,8 +211,14 @@ bool SOLID_REACTIVE(effect_params_t *params) {
     const uint8_t  speed    = sharkoon_nsr_frame.speed;
     const uint16_t max_tick = sharkoon_nsr_frame.max_tick;
 
-    for (uint8_t i = led_min; i < led_max; ++i) {
+    ws2812_led_t *out = &ws2812_leds[led_min];
+
+    for (uint8_t i = led_min; i < led_max; ++i, ++out) {
         RGB_MATRIX_TEST_LED_FLAGS();
+
+        uint8_t out_r;
+        uint8_t out_g;
+        uint8_t out_b;
 
         /*
          * KEY HELD
@@ -199,8 +227,10 @@ bool SOLID_REACTIVE(effect_params_t *params) {
          */
         if (sharkoon_nsr_is_held(i)) {
             sharkoon_nsr_state[i] = SHARKOON_NSR_HELD;
-            rgb_matrix_set_color(i, 0, 0, 0);
-            continue;
+            out_r = 0;
+            out_g = 0;
+            out_b = 0;
+            goto write_output;
         }
 
         /*
@@ -222,8 +252,10 @@ bool SOLID_REACTIVE(effect_params_t *params) {
             }
 
             sharkoon_nsr_state[i] = released_at;
-            rgb_matrix_set_color(i, 0, 0, 0);
-            continue;
+            out_r = 0;
+            out_g = 0;
+            out_b = 0;
+            goto write_output;
         }
 
         /*
@@ -233,8 +265,10 @@ bool SOLID_REACTIVE(effect_params_t *params) {
          * once per frame, not once per idle LED.
          */
         if (sharkoon_nsr_state[i] == SHARKOON_NSR_IDLE) {
-            rgb_matrix_set_color(i, base_rgb.r, base_rgb.g, base_rgb.b);
-            continue;
+            out_r = base_rgb.r;
+            out_g = base_rgb.g;
+            out_b = base_rgb.b;
+            goto write_output;
         }
 
         /*
@@ -250,15 +284,24 @@ bool SOLID_REACTIVE(effect_params_t *params) {
 
         if (offset >= 255) {
             sharkoon_nsr_state[i] = SHARKOON_NSR_IDLE;
-            rgb_matrix_set_color(i, base_rgb.r, base_rgb.g, base_rgb.b);
-            continue;
+            out_r = base_rgb.r;
+            out_g = base_rgb.g;
+            out_b = base_rgb.b;
+            goto write_output;
         }
 
         hsv_t hsv = base_hsv;
         hsv.v     = scale8((uint8_t)offset, base_hsv.v);
 
         const rgb_t rgb = rgb_matrix_hsv_to_rgb(hsv);
-        rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
+        out_r = rgb.r;
+        out_g = rgb.g;
+        out_b = rgb.b;
+
+    write_output:
+        out->r = out_r;
+        out->g = out_g;
+        out->b = out_b;
     }
 
     return rgb_matrix_check_finished_leds(led_max);
