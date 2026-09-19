@@ -686,9 +686,25 @@ void ws2812_set_color(int index, uint8_t red, uint8_t green, uint8_t blue) {
  * @brief Set color for all LEDs
  */
 void ws2812_set_color_all(uint8_t red, uint8_t green, uint8_t blue) {
+#ifdef WS2812_RGBW
+    /* Preserve the generic RGBW conversion semantics. */
     for (int i = 0; i < WS2812_LED_COUNT; i++) {
         ws2812_set_color(i, red, green, blue);
     }
+#else
+    /* The range is the complete local buffer, so avoid 104 calls through
+     * ws2812_set_color(), including its per-index bounds check and repeated
+     * base/index reconstruction. Walk the packed GRB buffer linearly. */
+    ws2812_led_t *out       = ws2812_leds;
+    ws2812_led_t *const end = ws2812_leds + WS2812_LED_COUNT;
+
+    while (out < end) {
+        out->r = red;
+        out->g = green;
+        out->b = blue;
+        ++out;
+    }
+#endif
 }
 
 /**
