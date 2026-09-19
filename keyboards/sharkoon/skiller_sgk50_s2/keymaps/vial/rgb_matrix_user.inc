@@ -46,12 +46,29 @@ extern hsv_t g_direct_mode_colors[RGB_MATRIX_LED_COUNT];
 bool sharkoon_direct_stream_active(void);
 
 /*
- * This keyboard is a non-split RGB matrix using the custom WS2812 driver.
- * In the accepted V3 ELF, rgb_matrix_set_color() is only a tail branch to
- * ws2812_set_color(), so calling the driver directly preserves the exact
- * color-write semantics while removing one branch from every rendered LED.
+ * This userspace is tied to the SGK50 S2 custom WS2812 backend. V3.5 proved
+ * that even the remaining rgb_matrix_set_color() -> ws2812_set_color() tail
+ * branch is measurable in the per-LED hotpath. For Direct/Hybrid only, write
+ * the driver's pending-frame buffer linearly instead of re-entering the
+ * single-LED API for every LED. ws2812_flush() still snapshots this same
+ * buffer, so frame/worker/DMA ownership is unchanged.
+ *
+ * Keep this deliberately fail-closed: RGBW needs the driver's RGB->RGBW
+ * conversion and a future LED-count/layout change must not silently use this
+ * RGB-only fast path.
  */
-void ws2812_set_color(int index, uint8_t red, uint8_t green, uint8_t blue);
+#include "ws2812.h"
+
+#ifdef WS2812_RGBW
+#    error "SHARKOON Direct/Hybrid WS2812 buffer fast path requires RGB-only LEDs"
+#endif
+
+_Static_assert(WS2812_LED_COUNT == RGB_MATRIX_LED_COUNT,
+               "SHARKOON Direct/Hybrid WS2812 buffer fast path requires a 1:1 RGB matrix/driver LED mapping");
+_Static_assert(sizeof(ws2812_led_t) == 3u,
+               "SHARKOON Direct/Hybrid WS2812 buffer fast path requires packed 3-byte RGB LEDs");
+
+extern ws2812_led_t ws2812_leds[WS2812_LED_COUNT];
 
 /*
  * Wenn das nicht definiert ist, kann unser Effekt niemals
@@ -727,15 +744,14 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
      * halben Direct-/halben Hybrid-Frame erzeugen.
      */
     if (sharkoon_hybrid_frame.direct_stream_active) {
-        for (uint8_t i = led_min; i < led_max; ++i) {
+        ws2812_led_t *out = &ws2812_leds[led_min];
+
+        for (uint8_t i = led_min; i < led_max; ++i, ++out) {
             const rgb_t rgb = sharkoon_direct_get_rgb(i);
 
-            ws2812_set_color(
-                i,
-                rgb.r,
-                rgb.g,
-                rgb.b
-            );
+            out->r = rgb.r;
+            out->g = rgb.g;
+            out->b = rgb.b;
         }
 
 #ifdef SHARKOON_PERF_BENCHMARK
@@ -773,7 +789,9 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
      * RENDER LEDs
      * =========================================================
      */
-    for (uint8_t i = led_min; i < led_max; ++i) {
+    ws2812_led_t *out = &ws2812_leds[led_min];
+
+    for (uint8_t i = led_min; i < led_max; ++i, ++out) {
         RGB_MATRIX_TEST_LED_FLAGS();
 
 #ifdef SHARKOON_PERF_BENCHMARK
@@ -940,12 +958,9 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
          * OUTPUT
          * =====================================================
          */
-        ws2812_set_color(
-            i,
-            rgb.r,
-            rgb.g,
-            rgb.b
-        );
+        out->r = rgb.r;
+        out->g = rgb.g;
+        out->b = rgb.b;
 
 #ifdef SHARKOON_PERF_BENCHMARK
         const uint32_t perf_t5 = sharkoon_perf_cycle_now();
