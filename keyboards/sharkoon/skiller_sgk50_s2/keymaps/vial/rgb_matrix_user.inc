@@ -343,29 +343,6 @@ static void sharkoon_update_flow_rgb_cache(const uint16_t *palette_data, uint8_t
 }
 
 /*
- * RGB-Farbe Richtung Weiß mischen.
- *
- * amount == 0 ist der häufigste Fall außerhalb von Sparkles/Reactive-Zonen
- * und kann ohne drei scale8-Paare sofort zurückkehren.
- *
- * qadd8() ist hier mathematisch redundant: scale8(255 - channel, amount)
- * kann niemals größer als (255 - channel) werden. Die Summe ist daher immer
- * <= 255 und die Sättigung kann nicht auslösen. Die normale uint8_t-Addition
- * ist für alle channel/amount-Kombinationen bitidentisch.
- */
-static inline rgb_t sharkoon_mix_white(rgb_t rgb, uint8_t amount) {
-    if (amount == 0) {
-        return rgb;
-    }
-
-    rgb.r += scale8(255 - rgb.r, amount);
-    rgb.g += scale8(255 - rgb.g, amount);
-    rgb.b += scale8(255 - rgb.b, amount);
-
-    return rgb;
-}
-
-/*
  * Alles, was innerhalb eines vollständigen RGB-Frames konstant bleibt, wird
  * einmal bei params->iter == 0 vorbereitet. QMK kann denselben Frame über
  * mehrere RGB_MATRIX_LED_PROCESS_LIMIT-Chunks verteilen; diese Chunks lesen
@@ -854,11 +831,9 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
             );
 
         if (sparkle_white != 0) {
-            rgb =
-                sharkoon_mix_white(
-                    rgb,
-                    sparkle_white
-                );
+            rgb.r += scale8(255 - rgb.r, sparkle_white);
+            rgb.g += scale8(255 - rgb.g, sparkle_white);
+            rgb.b += scale8(255 - rgb.b, sparkle_white);
         }
 
 #ifdef SHARKOON_PERF_BENCHMARK
@@ -886,11 +861,9 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
                         160
                     );
 
-                rgb =
-                    sharkoon_mix_white(
-                        rgb,
-                        reactive_white
-                    );
+                rgb.r += scale8(255 - rgb.r, reactive_white);
+                rgb.g += scale8(255 - rgb.g, reactive_white);
+                rgb.b += scale8(255 - rgb.b, reactive_white);
             }
         }
 

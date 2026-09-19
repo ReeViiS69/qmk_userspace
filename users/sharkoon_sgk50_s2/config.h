@@ -7,8 +7,8 @@
  * If SHARKOON_PERF_BENCHMARK is enabled for measurements, also switch
  * CONSOLE_ENABLE to yes in users/sharkoon_sgk50_s2/rules.mk.
  */
-#define SHARKOON_PERF_BENCHMARK
-#define DEBUG_MATRIX_SCAN_RATE
+// #define SHARKOON_PERF_BENCHMARK
+// #define DEBUG_MATRIX_SCAN_RATE
 // #define WS2812_DIAGNOSTICS
 // #define WS2812_DEBUG
 /*
