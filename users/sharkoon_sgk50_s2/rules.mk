@@ -27,3 +27,5 @@ REPEAT_KEY_ENABLE = yes
 # Set this to yes only when SHARKOON_PERF_BENCHMARK is enabled.
 CONSOLE_ENABLE = no
 KEYBOARD_SHARED_EP = no
+
+DEBOUNCE_TYPE = asym_eager_defer_pk
