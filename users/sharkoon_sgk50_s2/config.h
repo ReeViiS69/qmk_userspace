@@ -9,7 +9,6 @@
  */
 // #define SHARKOON_PERF_BENCHMARK
 // #define DEBUG_MATRIX_SCAN_RATE
-// #define WS2812_DIAGNOSTICS
 // #define WS2812_DEBUG
 /*
  * Storage layout for this confirmed SGK50 S2 hardware:
