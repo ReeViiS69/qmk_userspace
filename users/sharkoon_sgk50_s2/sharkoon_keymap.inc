@@ -95,6 +95,9 @@ static bool     sharkoon_macro_blink_on       = false;
 static uint16_t sharkoon_macro_blink_timer    = 0;
 static uint8_t  sharkoon_recording_led        = NO_LED;
 static uint8_t  sharkoon_caps_lock_led        = NO_LED;
+static uint8_t  sharkoon_unicode_typing_led   = NO_LED;
+static bool     sharkoon_unicode_led_active   = false;
+static rgb_t    sharkoon_unicode_led_color    = {0, 0, 0};
 static bool     sharkoon_caps_lock_active     = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
@@ -140,6 +143,22 @@ static void sharkoon_clear_macro_select_leds(void) {
     sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
 }
 
+static void sharkoon_render_unicode_typing_led(void) {
+    // The mode/color decision is event-driven in process_record_user().
+    // During normal NO_MODE operation this overlay does no LED work at all.
+    if (!sharkoon_unicode_led_active || sharkoon_unicode_typing_led == NO_LED) {
+        return;
+    }
+
+    const uint8_t v = rgb_matrix_config.hsv.v;
+    rgb_matrix_set_color(
+        sharkoon_unicode_typing_led,
+        sharkoon_unicode_led_color.r ? v : 0,
+        sharkoon_unicode_led_color.g ? v : 0,
+        sharkoon_unicode_led_color.b ? v : 0
+    );
+}
+
 static void sharkoon_start_macro_blink(void) {
     sharkoon_macro_blink_on    = true;
     sharkoon_macro_blink_timer = timer_read();
@@ -179,7 +198,8 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
 
     memset(sharkoon_macro_layer_led_count, 0, sizeof(sharkoon_macro_layer_led_count));
     memset(sharkoon_macro_layer_leds, 0, sizeof(sharkoon_macro_layer_leds));
-    sharkoon_caps_lock_led = NO_LED;
+    sharkoon_caps_lock_led      = NO_LED;
+    sharkoon_unicode_typing_led = NO_LED;
 
     uint8_t layer_count = dynamic_keymap_get_layer_count();
     if (layer_count > DYNAMIC_KEYMAP_LAYER_COUNT) {
@@ -218,6 +238,10 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
                     effective_keycode = keycode;
                 }
 
+                if (sharkoon_unicode_typing_led == NO_LED && effective_keycode == UNICODE_TYPING_CYCLE) {
+                    sharkoon_unicode_typing_led = led;
+                }
+
                 if (effective_keycode == REC_M0 || effective_keycode == REC_M1) {
                     sharkoon_macro_layer_add_led(layer, led);
                 }
@@ -239,7 +263,8 @@ static void sharkoon_mark_keymap_cache_dirty(void) {
         // is changing the dynamic keymap.
         sharkoon_clear_macro_select_leds();
         sharkoon_macro_select_layer = SHARKOON_NO_LAYER;
-        sharkoon_caps_lock_led      = NO_LED;
+        sharkoon_caps_lock_led       = NO_LED;
+        sharkoon_unicode_typing_led  = NO_LED;
     }
     sharkoon_keymap_cache_dirty = true;
 }
@@ -872,7 +897,34 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
                     }
                 }
 
-                set_unicode_typing_mode(modes[next_index]);
+                const uint8_t next_mode = modes[next_index];
+                set_unicode_typing_mode(next_mode);
+
+#ifdef RGB_MATRIX_ENABLE
+                // Decide the indicator state once, on the key event.
+                // The RGB callback only reapplies this cached state after the clearer.
+                switch (next_mode) {
+                    case UCTM_AUSSIE:
+                        sharkoon_unicode_led_active = true;
+                        sharkoon_unicode_led_color = (rgb_t){255, 0, 0};
+                        break;
+
+                    case UCTM_ZALGO:
+                        sharkoon_unicode_led_active = true;
+                        sharkoon_unicode_led_color = (rgb_t){0, 255, 0};
+                        break;
+
+                    case UCTM_SUPER:
+                        sharkoon_unicode_led_active = true;
+                        sharkoon_unicode_led_color = (rgb_t){0, 0, 255};
+                        break;
+
+                    case UCTM_NO_MODE:
+                    default:
+                        sharkoon_unicode_led_active = false;
+                        break;
+                }
+#endif
             }
 
             return false;
@@ -982,6 +1034,10 @@ bool rgb_matrix_indicators_user(void) {
     // on those LEDs intentionally afterwards.
     sharkoon_clear_disabled_leds();
 
+    // Active Unicode modes intentionally override the disabled-key clearer.
+    // In NO_MODE the overlay returns immediately and the clearer remains authoritative.
+    sharkoon_render_unicode_typing_led();
+
     if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
         const uint8_t brightness = rgb_matrix_config.hsv.v;
         rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
@@ -1035,7 +1091,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     // Layer 0: Basisbelegung
     [0] = LAYOUT_96_iso(
-        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12,    QK_MACRO_0,QK_MACRO_1, KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
+        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12, QK_MACRO_0,QK_MACRO_1,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
         KC_GRV,    KC_1,      KC_2,      KC_3,      KC_4,      KC_5,      KC_6,      KC_7,      KC_8,      KC_9,      KC_0,      KC_MINS,   KC_EQL,               KC_BSPC,    KC_INS,    KC_END,  KC_PGDN,     TG(2),
         KC_TAB,      KC_Q,      KC_W,      KC_E,      KC_R,      KC_T,      KC_Y,      KC_U,      KC_I,      KC_O,      KC_P,      KC_LBRC,   KC_RBRC,                        KC_NO,     MS_UP,   KC_PAUS,   KC_MPLY,
         KC_CAPS,      KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,           KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
@@ -1045,7 +1101,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     // Layer 1: Funktionen
     [1] = LAYOUT_96_iso(
-        EE_CLR,    KC_MPLY,   KC_MPRV,   KC_MNXT,   KC_MUTE,   KC_VOLD,   KC_VOLU,   RM_SPDD,   RM_SPDU,   QK_MACRO_0,QK_MACRO_1,KC_PSCR,   KC_SCRL,   REC_STOP, REC_STOP,    SOCDTOG,   _______,   RM_SPDU, _______,
+        EE_CLR,    KC_MPLY,   KC_MPRV,   KC_MNXT,   KC_MUTE,   KC_VOLD,   KC_VOLU,   RM_SPDD,   RM_SPDU,   QK_MACRO_0,QK_MACRO_1,KC_SCRL,   KC_PSCR,   REC_STOP, REC_STOP,    SOCDTOG,   _______,   RM_SPDU, _______,
         _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,              _______,    _______,   _______,   RM_SPDD, _______,
         MACRO_SELECT,_______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,                        _______,   _______,   _______, UNICODE_TYPING_CYCLE,
         REC_STOP,     _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,           _______,    _______,   _______,   _______,
@@ -1069,7 +1125,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     // 1) Shift-Ebene des Raw-Kompatibilitaetslayouts.
     // 2) Makro-Auswahl-Layer ueber MACRO_SELECT.
     [3] = LAYOUT_96_iso(
-        S(KC_ESC), S(KC_F1),  S(KC_F2),  S(KC_F3),  S(KC_F4),  S(KC_F5),  S(KC_F6),  S(KC_F7),  S(KC_F8),   REC_M0,    REC_M1,   KC_PSCR,   KC_SCRL,   REC_STOP,  REC_STOP,   SOCDTOG,S(KC_HOME),S(KC_PGUP), _______,
+        S(KC_ESC), S(KC_F1),  S(KC_F2),  S(KC_F3),  S(KC_F4),  S(KC_F5),  S(KC_F6),  S(KC_F7),  S(KC_F8),   REC_M0,    REC_M1,   KC_SCRL,   KC_PSCR,   REC_STOP,  REC_STOP,   SOCDTOG,S(KC_HOME),S(KC_PGUP), _______,
         KC_CIRC,   KC_EXLM,   KC_DQUO,   KC_HASH,   KC_DLR,    KC_PERC,   KC_AMPR,   KC_SLSH,   KC_LPRN,   KC_RPRN,   KC_EQL,    KC_QUES,    KC_GRV,            S(KC_BSPC), S(KC_INS), S(KC_END),S(KC_PGDN),   KC_NO,
         MACRO_SELECT,S(KC_Q),   S(KC_W),   S(KC_E),   S(KC_R),   S(KC_T),   S(KC_Z),   S(KC_U),   S(KC_I),   S(KC_O),   S(KC_P),   S(KC_U),   KC_ASTR,                        _______,   _______,   _______, UNICODE_TYPING_CYCLE,
         REC_STOP,     S(KC_A),   S(KC_S),   S(KC_D),   S(KC_F),   S(KC_G),   S(KC_H),   S(KC_J),   S(KC_K),   S(KC_L),   S(KC_O),   S(KC_A),   KC_QUOT,          S(KC_ENT),   _______,   _______,   _______,

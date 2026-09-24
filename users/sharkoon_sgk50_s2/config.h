@@ -44,7 +44,7 @@
 //enable socd for mousekeys aswell, custom setting, not a socd default
 #define SOCD_CLEANER_MOUSEKEY_ENABLE
 #define SOCD_CLEANER_RELEASE_DELAY_MIN_MS 2
-#define SOCD_CLEANER_RELEASE_DELAY_MAX_MS 200
+#define SOCD_CLEANER_RELEASE_DELAY_MAX_MS 50
 /*
  * Unicode typing uses WinCompose on Windows.
  * WinCompose must be installed on the host for Unicode output to work.
