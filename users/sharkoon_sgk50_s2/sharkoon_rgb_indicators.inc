@@ -2,7 +2,7 @@
  * Sharkoon RGB indicators and macro lighting.
  *
  * Owns LED discovery/cache, Caps/Unicode overlays and macro-selection/recording
- * lighting. The macro recorder itself remains in sharkoon_keymap.inc.
+ * lighting. The recorder itself lives in sharkoon_macro_recorder.inc.
  */
 
 #define SHARKOON_MACRO_LED_BLINK_MS 400
@@ -85,7 +85,7 @@ static void sharkoon_render_status_leds(void) {
 }
 
 static bool sharkoon_macro_lighting_active(void) {
-    return sharkoon_recording ||
+    return sharkoon_macro_recording_active() ||
            (sharkoon_macro_select_layer < DYNAMIC_KEYMAP_LAYER_COUNT &&
             sharkoon_macro_layer_led_count[sharkoon_macro_select_layer] > 0);
 }
@@ -112,7 +112,7 @@ static void sharkoon_render_macro_leds(void) {
         color = hsv_to_rgb(rgb_matrix_config.hsv);
     }
 
-    if (sharkoon_recording) {
+    if (sharkoon_macro_recording_active()) {
         if (sharkoon_recording_led != NO_LED) {
             rgb_matrix_set_color(sharkoon_recording_led, color.r, color.g, color.b);
         }
@@ -139,7 +139,7 @@ static void sharkoon_update_macro_select_layer(layer_state_t state) {
     sharkoon_clear_macro_select_leds();
     sharkoon_macro_select_layer = next_layer;
 
-    if (sharkoon_macro_select_layer != SHARKOON_NO_LAYER && !sharkoon_recording) {
+    if (sharkoon_macro_select_layer != SHARKOON_NO_LAYER && !sharkoon_macro_recording_active()) {
         sharkoon_start_macro_blink();
     }
 
