@@ -39,15 +39,9 @@ socd_cleaner_t socd_opposing_pairs[] = {
 #define SHARKOON_MACRO_RECORDING_SIZE   (SHARKOON_MACRO_MAX_ACTIONS * 2 * SHARKOON_MACRO_EVENT_SIZE)
 #define SHARKOON_MACRO_IO_CHUNK_SIZE    64
 
-#define SHARKOON_MACRO_LED_BLINK_MS     400
-#define SHARKOON_NO_LAYER               0xFF
-
 #define SHARKOON_BITSET_WORD_BITS       32u
 #define SHARKOON_MATRIX_KEY_COUNT       (MATRIX_ROWS * MATRIX_COLS)
 #define SHARKOON_MATRIX_BITSET_WORDS    ((SHARKOON_MATRIX_KEY_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
-#ifdef RGB_MATRIX_ENABLE
-#    define SHARKOON_LED_BITSET_WORDS   ((RGB_MATRIX_LED_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
-#endif
 
 enum custom_keycodes {
     REC_M0 = QK_USER_0,
@@ -92,261 +86,7 @@ static bool sharkoon_take_suppress_release(uint8_t row, uint8_t col) {
 }
 
 #ifdef RGB_MATRIX_ENABLE
-static bool     sharkoon_macro_blink_on       = false;
-static uint16_t sharkoon_macro_blink_timer    = 0;
-static uint8_t  sharkoon_recording_led        = NO_LED;
-static uint8_t  sharkoon_caps_lock_led        = NO_LED;
-static uint8_t  sharkoon_unicode_typing_led   = NO_LED;
-static bool     sharkoon_unicode_led_active   = false;
-static rgb_t    sharkoon_unicode_led_color    = {0, 0, 0};
-static bool     sharkoon_caps_lock_active     = false;
-static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
-static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
-static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
-static bool     sharkoon_keymap_cache_dirty   = false;
-
-static void sharkoon_macro_layer_add_led(uint8_t layer, uint8_t led) {
-    if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT || led >= RGB_MATRIX_LED_COUNT) {
-        return;
-    }
-
-    uint32_t      *word = &sharkoon_macro_layer_leds[layer][led / SHARKOON_BITSET_WORD_BITS];
-    const uint32_t mask = UINT32_C(1) << (led % SHARKOON_BITSET_WORD_BITS);
-
-    if ((*word & mask) == 0) {
-        *word |= mask;
-        ++sharkoon_macro_layer_led_count[layer];
-    }
-}
-
-static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, uint8_t b) {
-    if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT) {
-        return;
-    }
-
-    for (uint8_t word = 0; word < SHARKOON_LED_BITSET_WORDS; ++word) {
-        uint32_t bits = sharkoon_macro_layer_leds[layer][word];
-
-        while (bits != 0) {
-            const uint8_t bit = (uint8_t)__builtin_ctz(bits);
-            const uint8_t led = (uint8_t)(word * SHARKOON_BITSET_WORD_BITS + bit);
-
-            if (led < RGB_MATRIX_LED_COUNT) {
-                rgb_matrix_set_color(led, r, g, b);
-            }
-
-            bits &= bits - 1u;
-        }
-    }
-}
-
-static void sharkoon_clear_macro_select_leds(void) {
-    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
-}
-
-static void sharkoon_render_unicode_typing_led(void) {
-    // The mode/color decision is event-driven in process_record_user().
-    // During normal NO_MODE operation this overlay does no LED work at all.
-    if (!sharkoon_unicode_led_active || sharkoon_unicode_typing_led == NO_LED) {
-        return;
-    }
-
-    const uint8_t v = rgb_matrix_config.hsv.v;
-    rgb_matrix_set_color(
-        sharkoon_unicode_typing_led,
-        sharkoon_unicode_led_color.r ? v : 0,
-        sharkoon_unicode_led_color.g ? v : 0,
-        sharkoon_unicode_led_color.b ? v : 0
-    );
-}
-
-static void sharkoon_render_status_leds(void) {
-    sharkoon_render_unicode_typing_led();
-
-    if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
-        const uint8_t brightness = rgb_matrix_config.hsv.v;
-        rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
-    }
-}
-
-static bool sharkoon_macro_lighting_active(void) {
-    return sharkoon_recording ||
-           (sharkoon_macro_select_layer < DYNAMIC_KEYMAP_LAYER_COUNT &&
-            sharkoon_macro_layer_led_count[sharkoon_macro_select_layer] > 0);
-}
-
-#include "sharkoon_darkmode.inc"
-
-static void sharkoon_start_macro_blink(void) {
-    sharkoon_macro_blink_on    = true;
-    sharkoon_macro_blink_timer = timer_read();
-}
-
-static void sharkoon_render_macro_leds(void) {
-    if (!sharkoon_macro_lighting_active()) {
-        return;
-    }
-
-    if (timer_elapsed(sharkoon_macro_blink_timer) >= SHARKOON_MACRO_LED_BLINK_MS) {
-        sharkoon_macro_blink_timer = timer_read();
-        sharkoon_macro_blink_on    = !sharkoon_macro_blink_on;
-    }
-
-    rgb_t color = {0, 0, 0};
-    if (sharkoon_macro_blink_on) {
-        color = hsv_to_rgb(rgb_matrix_config.hsv);
-    }
-
-    // Recording has priority over the macro-selection layer.
-    if (sharkoon_recording) {
-        if (sharkoon_recording_led != NO_LED) {
-            rgb_matrix_set_color(sharkoon_recording_led, color.r, color.g, color.b);
-        }
-        return;
-    }
-
-    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, color.r, color.g, color.b);
-}
-
-static void sharkoon_update_macro_select_layer(layer_state_t state) {
-    uint8_t next_layer = SHARKOON_NO_LAYER;
-
-    // Layer 0 by itself must never create permanent recorder blinking.
-    // Any non-default layer uses its pre-resolved recorder view from the cache.
-    if (state != 0) {
-        const uint8_t highest_layer = get_highest_layer(state);
-        if (highest_layer < DYNAMIC_KEYMAP_LAYER_COUNT && sharkoon_macro_layer_led_count[highest_layer] > 0) {
-            next_layer = highest_layer;
-        }
-    }
-
-    if (next_layer == sharkoon_macro_select_layer) {
-        return;
-    }
-
-    // Always end the previous blink explicitly with black. This is intentional
-    // for LEDs with LED_FLAG_NONE as well as normal RGB-effect LEDs.
-    sharkoon_clear_macro_select_leds();
-    sharkoon_macro_select_layer = next_layer;
-
-    if (sharkoon_macro_select_layer != SHARKOON_NO_LAYER && !sharkoon_recording) {
-        sharkoon_start_macro_blink();
-    }
-
-    sharkoon_update_darkmode_rgb_state();
-}
-
-static void sharkoon_rebuild_keymap_led_cache(void) {
-    // Stop using the old mapping before replacing it. This also guarantees that
-    // a flag==0 LED touched by our overlay is explicitly cleared once.
-    sharkoon_clear_macro_select_leds();
-    sharkoon_macro_select_layer = SHARKOON_NO_LAYER;
-
-    memset(sharkoon_macro_layer_led_count, 0, sizeof(sharkoon_macro_layer_led_count));
-    memset(sharkoon_macro_layer_leds, 0, sizeof(sharkoon_macro_layer_leds));
-    sharkoon_caps_lock_led      = NO_LED;
-    sharkoon_unicode_typing_led = NO_LED;
-
-    uint8_t layer_count = dynamic_keymap_get_layer_count();
-    if (layer_count > DYNAMIC_KEYMAP_LAYER_COUNT) {
-        layer_count = DYNAMIC_KEYMAP_LAYER_COUNT;
-    }
-
-    for (uint8_t row = 0; row < MATRIX_ROWS; ++row) {
-        for (uint8_t col = 0; col < MATRIX_COLS; ++col) {
-            const uint8_t led = g_led_config.matrix_co[row][col];
-            if (led == NO_LED) {
-                continue;
-            }
-
-            if (layer_count == 0) {
-                continue;
-            }
-
-            uint16_t effective_keycode = dynamic_keymap_get_keycode(0, row, col);
-
-            // Caps is intentionally tied to KC_CAPS on the base layer rather
-            // than to a hard-coded matrix position.
-            if (sharkoon_caps_lock_led == NO_LED && effective_keycode == KC_CAPS) {
-                sharkoon_caps_lock_led = led;
-            }
-
-            /*
-             * Resolve selectable layers in one upward pass. A transparent key
-             * inherits the already resolved keycode below it; a non-transparent
-             * key replaces it. This is exactly what the previous backwards scan
-             * did for every top layer, but O(layers) instead of O(layers^2).
-             */
-            for (uint8_t layer = 1; layer < layer_count; ++layer) {
-                const uint16_t keycode = dynamic_keymap_get_keycode(layer, row, col);
-
-                if (keycode != KC_TRNS) {
-                    effective_keycode = keycode;
-                }
-
-                if (sharkoon_unicode_typing_led == NO_LED && effective_keycode == UNICODE_TYPING_CYCLE) {
-                    sharkoon_unicode_typing_led = led;
-                }
-
-                if (effective_keycode == REC_M0 || effective_keycode == REC_M1) {
-                    sharkoon_macro_layer_add_led(layer, led);
-                }
-            }
-        }
-    }
-
-    sharkoon_keymap_cache_dirty = false;
-}
-
-static void sharkoon_refresh_keymap_led_cache(void) {
-    sharkoon_rebuild_keymap_led_cache();
-    sharkoon_update_macro_select_layer(layer_state);
-}
-
-static void sharkoon_mark_keymap_cache_dirty(void) {
-    if (!sharkoon_keymap_cache_dirty) {
-        // Do not keep rendering positions from the old layout while VIA/Vial
-        // is changing the dynamic keymap.
-        sharkoon_clear_macro_select_leds();
-        sharkoon_macro_select_layer = SHARKOON_NO_LAYER;
-        sharkoon_caps_lock_led       = NO_LED;
-        sharkoon_unicode_typing_led  = NO_LED;
-    }
-    sharkoon_keymap_cache_dirty = true;
-}
-
-static bool sharkoon_is_dynamic_keymap_write(uint8_t command_id) {
-    switch (command_id) {
-        case id_dynamic_keymap_set_keycode:
-        case id_dynamic_keymap_reset:
-        case id_dynamic_keymap_set_buffer:
-#ifdef VIA_EEPROM_ALLOW_RESET
-        case id_eeprom_reset:
-#endif
-            return true;
-        default:
-            return false;
-    }
-}
-
-static void sharkoon_observe_via_command(uint8_t *data, uint8_t length) {
-    if (length == 0) {
-        return;
-    }
-
-    const bool keymap_write = sharkoon_is_dynamic_keymap_write(data[0]);
-
-    // VIA calls the keyboard hook before processing the command. Repeated write
-    // packets therefore only mark the cache dirty. The first following non-write
-    // packet can safely rebuild once because all previous writes are complete.
-    if (sharkoon_keymap_cache_dirty && !keymap_write) {
-        sharkoon_refresh_keymap_led_cache();
-    }
-
-    if (keymap_write) {
-        sharkoon_mark_keymap_cache_dirty();
-    }
-}
+#    include "sharkoon_rgb_indicators.inc"
 #endif
 
 #ifdef VIALRGB_DIRECT_ENABLE
@@ -372,7 +112,7 @@ bool sharkoon_direct_stream_active(void) {
 #ifdef VIA_ENABLE
 bool via_command_kb(uint8_t *data, uint8_t length) {
 #ifdef RGB_MATRIX_ENABLE
-    sharkoon_observe_via_command(data, length);
+    sharkoon_rgb_observe_via_command(data, length);
 #endif
 
 #ifdef VIALRGB_DIRECT_ENABLE
@@ -566,26 +306,16 @@ void keyboard_post_init_user(void) {
     sharkoon_perf_enable_dwt();
     sharkoon_perf_last_key_event_ms = timer_read32();
 #endif
-    sharkoon_caps_lock_active = host_keyboard_led_state().caps_lock;
-    sharkoon_apply_disabled_led_flags();
-    sharkoon_refresh_keymap_led_cache();
+    sharkoon_rgb_indicators_init();
 }
 
 bool led_update_user(led_t led_state) {
-    sharkoon_caps_lock_active = led_state.caps_lock;
-    sharkoon_darkmode_refresh();
+    sharkoon_rgb_caps_lock_changed(led_state.caps_lock);
     return true;
 }
 
 layer_state_t layer_state_set_user(layer_state_t state) {
-    // Normal MO/OSL/TG changes only switch the already prepared cache view.
-    // A rebuild here can happen only if a preceding VIA/Vial layout write left
-    // the cache dirty and the configurator has not triggered the refresh yet.
-    if (sharkoon_keymap_cache_dirty) {
-        sharkoon_rebuild_keymap_led_cache();
-    }
-
-    sharkoon_update_macro_select_layer(state);
+    sharkoon_rgb_layer_state_changed(state);
     return state;
 }
 #endif
@@ -610,14 +340,7 @@ static void sharkoon_start_recording(uint8_t slot, uint8_t row, uint8_t col) {
     sharkoon_pressed_count      = 0;
 
 #ifdef RGB_MATRIX_ENABLE
-    // Selection is hidden during recording. Clear its last rendered state once,
-    // but keep the selected layer cached so it can resume after recording.
-    sharkoon_clear_macro_select_leds();
-
-    // The physical event already gives us the exact recorder LED for free.
-    sharkoon_recording_led = g_led_config.matrix_co[row][col];
-    sharkoon_start_macro_blink();
-    sharkoon_update_darkmode_rgb_state();
+    sharkoon_rgb_macro_recording_started(row, col);
 #endif
 
     memset(sharkoon_recorded_key, 0, sizeof(sharkoon_recorded_key));
@@ -856,12 +579,7 @@ static void sharkoon_finish_recording(bool force_release) {
     sharkoon_recording          = false;
     sharkoon_accept_new_presses = false;
 #ifdef RGB_MATRIX_ENABLE
-    // Always end our own blink explicitly with black, independent of LED flags.
-    if (sharkoon_recording_led != NO_LED) {
-        rgb_matrix_set_color(sharkoon_recording_led, 0, 0, 0);
-    }
-    sharkoon_recording_led = NO_LED;
-    sharkoon_update_darkmode_rgb_state();
+    sharkoon_rgb_macro_recording_finished();
 #endif
 }
 
@@ -967,31 +685,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
                 set_unicode_typing_mode(next_mode);
 
 #ifdef RGB_MATRIX_ENABLE
-                // Decide the indicator state once, on the key event.
-                // The RGB callback only reapplies this cached state after the clearer.
-                switch (next_mode) {
-                    case UCTM_AUSSIE:
-                        sharkoon_unicode_led_active = true;
-                        sharkoon_unicode_led_color = (rgb_t){255, 0, 0};
-                        break;
-
-                    case UCTM_ZALGO:
-                        sharkoon_unicode_led_active = true;
-                        sharkoon_unicode_led_color = (rgb_t){0, 255, 0};
-                        break;
-
-                    case UCTM_SUPER:
-                        sharkoon_unicode_led_active = true;
-                        sharkoon_unicode_led_color = (rgb_t){0, 0, 255};
-                        break;
-
-                    case UCTM_NO_MODE:
-                    default:
-                        sharkoon_unicode_led_active = false;
-                        break;
-                }
-
-                sharkoon_darkmode_refresh();
+                sharkoon_rgb_unicode_mode_changed(next_mode);
 #endif
             }
 
@@ -1095,21 +789,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     return true;
 }
 
-#ifdef RGB_MATRIX_ENABLE
-bool rgb_matrix_indicators_user(void) {
-    if (sharkoon_darkmode_is_active()) {
-        // RGB runs only temporarily for macro blinking; keep its background dark.
-        rgb_matrix_set_color_all(0, 0, 0);
-    } else {
-        // Normal effects (including Digital Rain) may still touch LED_FLAG_NONE.
-        sharkoon_clear_disabled_leds();
-    }
 
-    sharkoon_render_status_leds();
-    sharkoon_render_macro_leds();
-    return true;
-}
-#endif
 
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
