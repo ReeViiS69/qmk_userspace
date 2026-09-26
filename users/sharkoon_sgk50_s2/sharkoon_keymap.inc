@@ -55,6 +55,7 @@ enum custom_keycodes {
     REC_STOP = QK_USER_2,
     MACRO_SELECT = QK_USER_3,
     UNICODE_TYPING_CYCLE = QK_USER_4,
+    RGB_DARK = QK_USER_5,
 };
 
 static bool    sharkoon_recording              = false;
@@ -99,6 +100,7 @@ static uint8_t  sharkoon_unicode_typing_led   = NO_LED;
 static bool     sharkoon_unicode_led_active   = false;
 static rgb_t    sharkoon_unicode_led_color    = {0, 0, 0};
 static bool     sharkoon_caps_lock_active     = false;
+static bool     sharkoon_rgb_darkmode          = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
 static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
@@ -159,9 +161,109 @@ static void sharkoon_render_unicode_typing_led(void) {
     );
 }
 
+static void sharkoon_render_status_leds(void) {
+    sharkoon_render_unicode_typing_led();
+
+    if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
+        const uint8_t brightness = rgb_matrix_config.hsv.v;
+        rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
+    }
+}
+
+static bool sharkoon_macro_lighting_active(void) {
+    return sharkoon_recording ||
+           (sharkoon_macro_select_layer < DYNAMIC_KEYMAP_LAYER_COUNT &&
+            sharkoon_macro_layer_led_count[sharkoon_macro_select_layer] > 0);
+}
+
+static void sharkoon_darkmode_idle(void) {
+    rgb_matrix_disable_noeeprom();
+    rgb_matrix_task(); // STARTING -> RENDERING
+    rgb_matrix_task(); // RENDERING -> FLUSHING, buffer is black
+    sharkoon_render_status_leds();
+    rgb_matrix_task(); // flush black + status LEDs once
+}
+
+static void sharkoon_darkmode_refresh(void) {
+    if (!sharkoon_rgb_darkmode || rgb_matrix_is_enabled()) {
+        return;
+    }
+
+    // RGB Matrix is sleeping; update only the event-driven status LEDs.
+    if (sharkoon_caps_lock_led != NO_LED) {
+        rgb_matrix_set_color(sharkoon_caps_lock_led, 0, 0, 0);
+    }
+    if (sharkoon_unicode_typing_led != NO_LED) {
+        rgb_matrix_set_color(sharkoon_unicode_typing_led, 0, 0, 0);
+    }
+
+    sharkoon_render_status_leds();
+    rgb_matrix_update_pwm_buffers();
+}
+
+static void sharkoon_update_darkmode_rgb_state(void) {
+    if (!sharkoon_rgb_darkmode) {
+        return;
+    }
+
+    if (sharkoon_macro_lighting_active()) {
+        if (!rgb_matrix_is_enabled()) {
+            rgb_matrix_enable_noeeprom();
+        }
+    } else if (rgb_matrix_is_enabled()) {
+        sharkoon_darkmode_idle();
+    }
+}
+
+static void sharkoon_toggle_rgb_darkmode(void) {
+    if (sharkoon_rgb_darkmode) {
+        sharkoon_rgb_darkmode = false;
+        if (!rgb_matrix_is_enabled()) {
+            rgb_matrix_enable_noeeprom();
+        }
+        return;
+    }
+
+    if (!rgb_matrix_is_enabled()) {
+        rgb_matrix_enable_noeeprom();
+        return;
+    }
+
+    sharkoon_rgb_darkmode = true;
+    if (!sharkoon_macro_lighting_active()) {
+        sharkoon_darkmode_idle();
+    }
+}
+
 static void sharkoon_start_macro_blink(void) {
     sharkoon_macro_blink_on    = true;
     sharkoon_macro_blink_timer = timer_read();
+}
+
+static void sharkoon_render_macro_leds(void) {
+    if (!sharkoon_macro_lighting_active()) {
+        return;
+    }
+
+    if (timer_elapsed(sharkoon_macro_blink_timer) >= SHARKOON_MACRO_LED_BLINK_MS) {
+        sharkoon_macro_blink_timer = timer_read();
+        sharkoon_macro_blink_on    = !sharkoon_macro_blink_on;
+    }
+
+    rgb_t color = {0, 0, 0};
+    if (sharkoon_macro_blink_on) {
+        color = hsv_to_rgb(rgb_matrix_config.hsv);
+    }
+
+    // Recording has priority over the macro-selection layer.
+    if (sharkoon_recording) {
+        if (sharkoon_recording_led != NO_LED) {
+            rgb_matrix_set_color(sharkoon_recording_led, color.r, color.g, color.b);
+        }
+        return;
+    }
+
+    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, color.r, color.g, color.b);
 }
 
 static void sharkoon_update_macro_select_layer(layer_state_t state) {
@@ -188,6 +290,8 @@ static void sharkoon_update_macro_select_layer(layer_state_t state) {
     if (sharkoon_macro_select_layer != SHARKOON_NO_LAYER && !sharkoon_recording) {
         sharkoon_start_macro_blink();
     }
+
+    sharkoon_update_darkmode_rgb_state();
 }
 
 static void sharkoon_rebuild_keymap_led_cache(void) {
@@ -527,6 +631,7 @@ void keyboard_post_init_user(void) {
 
 bool led_update_user(led_t led_state) {
     sharkoon_caps_lock_active = led_state.caps_lock;
+    sharkoon_darkmode_refresh();
     return true;
 }
 
@@ -570,6 +675,7 @@ static void sharkoon_start_recording(uint8_t slot, uint8_t row, uint8_t col) {
     // The physical event already gives us the exact recorder LED for free.
     sharkoon_recording_led = g_led_config.matrix_co[row][col];
     sharkoon_start_macro_blink();
+    sharkoon_update_darkmode_rgb_state();
 #endif
 
     memset(sharkoon_recorded_key, 0, sizeof(sharkoon_recorded_key));
@@ -813,6 +919,7 @@ static void sharkoon_finish_recording(bool force_release) {
         rgb_matrix_set_color(sharkoon_recording_led, 0, 0, 0);
     }
     sharkoon_recording_led = NO_LED;
+    sharkoon_update_darkmode_rgb_state();
 #endif
 }
 
@@ -876,6 +983,29 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     }
 
     switch (keycode) {
+#ifdef RGB_MATRIX_ENABLE
+        case RGB_DARK:
+            sharkoon_set_suppress_release(row, col);
+
+            if (record->event.pressed) {
+                sharkoon_toggle_rgb_darkmode();
+            }
+
+            return false;
+
+        case RM_TOGG:
+            if (record->event.pressed && sharkoon_rgb_darkmode) {
+                sharkoon_rgb_darkmode = false;
+
+                // Darkmode may already have RGB awake temporarily for macro blinking.
+                // In both Darkmode states RM_TOGG must therefore end with RGB enabled.
+                if (rgb_matrix_is_enabled()) {
+                    return false;
+                }
+            }
+            return true;
+#endif
+
         case UNICODE_TYPING_CYCLE:
             sharkoon_set_suppress_release(row, col);
 
@@ -924,6 +1054,8 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
                         sharkoon_unicode_led_active = false;
                         break;
                 }
+
+                sharkoon_darkmode_refresh();
 #endif
             }
 
@@ -1029,60 +1161,16 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
 #ifdef RGB_MATRIX_ENABLE
 bool rgb_matrix_indicators_user(void) {
-    // Normal effects (including Digital Rain) may still touch LED_FLAG_NONE.
-    // Keep that policy centralized, then allow our own status overlays to draw
-    // on those LEDs intentionally afterwards.
-    sharkoon_clear_disabled_leds();
-
-    // Active Unicode modes intentionally override the disabled-key clearer.
-    // In NO_MODE the overlay returns immediately and the clearer remains authoritative.
-    sharkoon_render_unicode_typing_led();
-
-    if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
-        const uint8_t brightness = rgb_matrix_config.hsv.v;
-        rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
+    if (sharkoon_rgb_darkmode) {
+        // RGB runs only temporarily for macro blinking; keep its background dark.
+        rgb_matrix_set_color_all(0, 0, 0);
+    } else {
+        // Normal effects (including Digital Rain) may still touch LED_FLAG_NONE.
+        sharkoon_clear_disabled_leds();
     }
 
-    const bool macro_select_active =
-        sharkoon_macro_select_layer < DYNAMIC_KEYMAP_LAYER_COUNT &&
-        sharkoon_macro_layer_led_count[sharkoon_macro_select_layer] > 0;
-
-    if (!macro_select_active && !sharkoon_recording) {
-        return true;
-    }
-
-    if (timer_elapsed(sharkoon_macro_blink_timer) >= SHARKOON_MACRO_LED_BLINK_MS) {
-        sharkoon_macro_blink_timer = timer_read();
-        sharkoon_macro_blink_on    = !sharkoon_macro_blink_on;
-    }
-
-    // OFF frames need no HSV -> RGB conversion at all.
-    if (!sharkoon_macro_blink_on) {
-        if (sharkoon_recording) {
-            if (sharkoon_recording_led != NO_LED) {
-                rgb_matrix_set_color(sharkoon_recording_led, 0, 0, 0);
-            }
-        } else {
-            sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
-        }
-        return true;
-    }
-
-    const rgb_t status_rgb = hsv_to_rgb(rgb_matrix_config.hsv);
-
-    // Recording has priority over selection and uses only the physical key that
-    // actually started the recording.
-    if (sharkoon_recording) {
-        if (sharkoon_recording_led != NO_LED) {
-            rgb_matrix_set_color(sharkoon_recording_led, status_rgb.r, status_rgb.g, status_rgb.b);
-        }
-        return true;
-    }
-
-    // The active layer view was already fully resolved when the keymap cache was
-    // rebuilt. RGB frames only render the cached LED bitset; no keymap scan occurs.
-    sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, status_rgb.r, status_rgb.g, status_rgb.b);
-
+    sharkoon_render_status_leds();
+    sharkoon_render_macro_leds();
     return true;
 }
 #endif
@@ -1091,22 +1179,22 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     // Layer 0: Basisbelegung
     [0] = LAYOUT_96_iso(
-        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12, QK_MACRO_0,QK_MACRO_1,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
-        KC_GRV,    KC_1,      KC_2,      KC_3,      KC_4,      KC_5,      KC_6,      KC_7,      KC_8,      KC_9,      KC_0,      KC_MINS,   KC_EQL,               KC_BSPC,    KC_INS,    KC_END,  KC_PGDN,     TG(2),
-        KC_TAB,      KC_Q,      KC_W,      KC_E,      KC_R,      KC_T,      KC_Y,      KC_U,      KC_I,      KC_O,      KC_P,      KC_LBRC,   KC_RBRC,                        KC_NO,     MS_UP,   KC_PAUS,   KC_MPLY,
-        KC_CAPS,      KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,           KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
-        SC_LSPO,    KC_NUBS,   KC_Z,      KC_X,      KC_C,      KC_V,      KC_B,      KC_N,      KC_M,      KC_COMM,   KC_DOT,    KC_SLSH,       SC_RSPC,         KC_RSFT,    KC_UP,     KC_NO,   KC_NO,     MS_BTN2,
-        SC_LCPO,    KC_LGUI,    SC_LAPO,                                   KC_SPC,                                    SC_RAPC,   MO(1),     SC_RCPC,   MS_BTN1,   KC_LEFT,    KC_DOWN,   KC_RGHT, MS_BTN3
+        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12, QK_MACRO_0, QK_MACRO_1,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
+        KC_GRV,    KC_1,      KC_2,      KC_3,      KC_4,      KC_5,      KC_6,      KC_7,      KC_8,      KC_9,      KC_0,      KC_MINS,   KC_EQL,                KC_BSPC,    KC_INS,    KC_END,  KC_PGDN,     TG(2),
+        KC_TAB,      KC_Q,      KC_W,      KC_E,      KC_R,      KC_T,      KC_Y,      KC_U,      KC_I,      KC_O,      KC_P,      KC_LBRC,   KC_RBRC,                         KC_WSCH,   MS_UP,   KC_PAUS,   KC_MPLY,
+        KC_CAPS,      KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,            KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
+        SC_LSPO,    KC_NUBS,   KC_Z,      KC_X,      KC_C,      KC_V,      KC_B,      KC_N,      KC_M,      KC_COMM,   KC_DOT,    KC_SLSH,       SC_RSPC,          KC_RSFT,    KC_UP,     MS_BTN4, MS_BTN5,   MS_BTN2,
+        SC_LCPO,    KC_LGUI,    SC_LAPO,                                   KC_SPC,                                    SC_RAPC,LT(1, KC_INT3), SC_RCPC,   MS_BTN1,   KC_LEFT,   KC_DOWN,   KC_RGHT, MS_BTN3
     ),
 
     // Layer 1: Funktionen
     [1] = LAYOUT_96_iso(
-        EE_CLR,    KC_MPLY,   KC_MPRV,   KC_MNXT,   KC_MUTE,   KC_VOLD,   KC_VOLU,   RM_SPDD,   RM_SPDU,   QK_MACRO_0,QK_MACRO_1,KC_SCRL,   KC_PSCR,   REC_STOP, REC_STOP,    SOCDTOG,   _______,   RM_SPDU, _______,
-        _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,              _______,    _______,   _______,   RM_SPDD, _______,
-        MACRO_SELECT,_______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,                        _______,   _______,   _______, UNICODE_TYPING_CYCLE,
-        REC_STOP,     _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,           _______,    _______,   _______,   _______,
+        EE_CLR,    KC_MPLY,   KC_MPRV,   KC_MNXT,   KC_MUTE,   KC_VOLD,   KC_VOLU,   RM_SPDD,   RM_SPDU,   QK_MACRO_0,QK_MACRO_1,KC_SCRL,   KC_PSCR,   REC_STOP, REC_STOP,    SOCDTOG,   RM_SATU,   RM_SPDU, RGB_DARK,
+        _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,              _______,    _______,   RM_SATD,   RM_SPDD, _______,
+        MACRO_SELECT,_______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,                        _______,   MS_WHLU,   _______, UNICODE_TYPING_CYCLE,
+        REC_STOP,     _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,           _______,    MS_WHLL,   MS_WHLD,   MS_WHLR,
         _______,    _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,       _______,         _______,    RM_VALU,   _______,   _______, _______,
-        _______,    GU_TOGG,    _______,                                   _______,                                    _______,   _______,   _______,   _______,  RM_HUEU,    RM_VALD,   RM_NEXT,   _______
+        _______,    GU_TOGG,    _______,                                   _______,                                    _______,   _______,   _______,   _______,   RM_HUEU,   RM_VALD,   RM_NEXT,   _______
     ),
 
     // Deutsch-auf-US Raw-Kompatibilitaet.
@@ -1129,7 +1217,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         KC_CIRC,   KC_EXLM,   KC_DQUO,   KC_HASH,   KC_DLR,    KC_PERC,   KC_AMPR,   KC_SLSH,   KC_LPRN,   KC_RPRN,   KC_EQL,    KC_QUES,    KC_GRV,            S(KC_BSPC), S(KC_INS), S(KC_END),S(KC_PGDN),   KC_NO,
         MACRO_SELECT,S(KC_Q),   S(KC_W),   S(KC_E),   S(KC_R),   S(KC_T),   S(KC_Z),   S(KC_U),   S(KC_I),   S(KC_O),   S(KC_P),   S(KC_U),   KC_ASTR,                        _______,   _______,   _______, UNICODE_TYPING_CYCLE,
         REC_STOP,     S(KC_A),   S(KC_S),   S(KC_D),   S(KC_F),   S(KC_G),   S(KC_H),   S(KC_J),   S(KC_K),   S(KC_L),   S(KC_O),   S(KC_A),   KC_QUOT,          S(KC_ENT),   _______,   _______,   _______,
-        _______,    KC_RABK,   S(KC_Y),   S(KC_X),   S(KC_C),   S(KC_V),   S(KC_B),   S(KC_N),   S(KC_M),   KC_SCLN,   KC_COLN,   KC_UNDS,       _______,          _______,  S(KC_UP),   _______,   _______, _______,
+        TG(3),      KC_RABK,   S(KC_Y),   S(KC_X),   S(KC_C),   S(KC_V),   S(KC_B),   S(KC_N),   S(KC_M),   KC_SCLN,   KC_COLN,   KC_UNDS,       _______,          _______,  S(KC_UP),   _______,   _______, _______,
         _______,    _______,    _______,                                   S(KC_SPC),                                  _______,   _______,   _______,   _______,S(KC_LEFT),S(KC_DOWN),S(KC_RGHT),   _______
     )
 };
