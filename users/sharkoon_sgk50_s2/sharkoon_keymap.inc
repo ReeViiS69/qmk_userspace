@@ -35,8 +35,6 @@ socd_cleaner_t socd_opposing_pairs[] = {
     {{MS_LEFT,   MS_RGHT,}, SOCD_CLEANER_LAST},
 };
 #define SHARKOON_BITSET_WORD_BITS       32u
-#define SHARKOON_MATRIX_KEY_COUNT       (MATRIX_ROWS * MATRIX_COLS)
-#define SHARKOON_MATRIX_BITSET_WORDS    ((SHARKOON_MATRIX_KEY_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
 
 enum custom_keycodes {
     REC_M0 = QK_USER_0,
@@ -47,75 +45,14 @@ enum custom_keycodes {
     RGB_DARK = QK_USER_5,
 };
 
-static uint32_t sharkoon_suppress_release[SHARKOON_MATRIX_BITSET_WORDS];
-
-static uint16_t sharkoon_matrix_bit_index(uint8_t row, uint8_t col) {
-    return ((uint16_t)row * MATRIX_COLS) + col;
-}
-
-static void sharkoon_set_suppress_release(uint8_t row, uint8_t col) {
-    const uint16_t bit = sharkoon_matrix_bit_index(row, col);
-    sharkoon_suppress_release[bit / SHARKOON_BITSET_WORD_BITS] |=
-        UINT32_C(1) << (bit % SHARKOON_BITSET_WORD_BITS);
-}
-
-static bool sharkoon_take_suppress_release(uint8_t row, uint8_t col) {
-    const uint16_t bit  = sharkoon_matrix_bit_index(row, col);
-    uint32_t      *word = &sharkoon_suppress_release[bit / SHARKOON_BITSET_WORD_BITS];
-    const uint32_t mask = UINT32_C(1) << (bit % SHARKOON_BITSET_WORD_BITS);
-
-    if ((*word & mask) == 0) {
-        return false;
-    }
-
-    *word &= ~mask;
-    return true;
-}
-
+#include "sharkoon_key_event_guard.inc"
 #include "sharkoon_macro_recorder.inc"
 
 #ifdef RGB_MATRIX_ENABLE
 #    include "sharkoon_rgb_indicators.inc"
 #endif
 
-#ifdef VIALRGB_DIRECT_ENABLE
-void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length);
-
-static uint32_t sharkoon_direct_last_packet = 0;
-static bool     sharkoon_direct_seen        = false;
-
-bool sharkoon_direct_stream_active(void) {
-    if (!sharkoon_direct_seen) {
-        return false;
-    }
-
-    if (timer_elapsed32(sharkoon_direct_last_packet) >= 250) {
-        sharkoon_direct_seen = false;
-        return false;
-    }
-
-    return true;
-}
-#endif
-
-#ifdef VIA_ENABLE
-bool via_command_kb(uint8_t *data, uint8_t length) {
-#ifdef RGB_MATRIX_ENABLE
-    sharkoon_rgb_observe_via_command(data, length);
-#endif
-
-#ifdef VIALRGB_DIRECT_ENABLE
-    if (length >= 2 && data[0] == id_custom_set_value && data[1] == vialrgb_direct_fastset) {
-        sharkoon_direct_mark_dirty_packet(data, length);
-        sharkoon_direct_last_packet = timer_read32();
-        sharkoon_direct_seen        = true;
-    }
-#endif
-
-    // Never consume VIA/Vial traffic here; the core must process it normally.
-    return false;
-}
-#endif
+#include "sharkoon_via_rgb.inc"
 
 #ifdef SHARKOON_PERF_BENCHMARK
 #    include "sharkoon_perf_benchmark.inc"
