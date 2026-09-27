@@ -315,14 +315,14 @@ static inline __attribute__((always_inline)) void sharkoon_macro_select_process(
     }
 }
 
-static inline __attribute__((always_inline)) void sharkoon_macro_record_start_process(uint16_t keycode, keyrecord_t *record, uint8_t row, uint8_t col) {
+static inline __attribute__((always_inline)) void sharkoon_macro_record_start_process(uint16_t keycode, keyrecord_t *record) {
     if (record->event.pressed) {
         layer_lock_off(1);
         layer_off(3);
         sharkoon_consume_active_oneshot_layer();
 
         if (!sharkoon_recording) {
-            sharkoon_start_recording(keycode == REC_M0 ? 0 : 1, row, col);
+            sharkoon_start_recording(keycode == REC_M0 ? 0 : 1, record->event.key.row, record->event.key.col);
         }
     }
 }
@@ -333,12 +333,15 @@ static inline __attribute__((always_inline)) void sharkoon_macro_record_stop_pro
     }
 }
 
-static inline __attribute__((always_inline)) bool sharkoon_macro_recorder_capture(uint16_t keycode, keyrecord_t *record, uint8_t row, uint8_t col) {
+static inline __attribute__((always_inline)) bool sharkoon_macro_recorder_capture(uint16_t keycode, keyrecord_t *record) {
     // VIA macro playback keys are controls, not recordable input. Swallow them
     // while recording so a stored macro cannot recursively play into a capture.
     if (keycode >= QK_MACRO && keycode <= QK_MACRO_MAX) {
         return false;
     }
+
+    const uint8_t row = record->event.key.row;
+    const uint8_t col = record->event.key.col;
 
     if (record->event.pressed) {
         // Only 8-bit keycodes can be represented by QMK's send-string DOWN/UP

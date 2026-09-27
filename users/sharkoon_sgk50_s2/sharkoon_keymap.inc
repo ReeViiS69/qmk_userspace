@@ -126,9 +126,6 @@ static inline __attribute__((always_inline)) uint8_t sharkoon_next_unicode_typin
 }
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-    const uint8_t row = record->event.key.row;
-    const uint8_t col = record->event.key.col;
-
     switch (keycode) {
 #ifdef RGB_MATRIX_ENABLE
         case RGB_DARK:
@@ -162,7 +159,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
         case REC_M0:
         case REC_M1:
-            sharkoon_macro_record_start_process(keycode, record, row, col);
+            sharkoon_macro_record_start_process(keycode, record);
             return false;
 
         case REC_STOP:
@@ -177,7 +174,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         return true;
     }
 
-    return sharkoon_macro_recorder_capture(keycode, record, row, col);
+    return sharkoon_macro_recorder_capture(keycode, record);
 }
 
 
