@@ -294,11 +294,14 @@ static inline hsv_t sharkoon_palette_interp_raw(const hsv_t *palette, uint8_t x)
 static rgb_t           sharkoon_flow_rgb_cache[SHARKOON_FLOW_COLOR_COUNT];
 static const uint16_t *sharkoon_flow_cache_palette;
 static uint8_t         sharkoon_flow_cache_minimum_hue;
-static bool            sharkoon_flow_cache_valid;
 
+/*
+ * PaletteFx returns immutable, non-NULL palette data. The zero-initialized
+ * cached pointer therefore also marks the unbuilt cache. It is updated only
+ * after all RGB entries are ready; no separate validity flag is needed.
+ */
 static void sharkoon_update_flow_rgb_cache(const uint16_t *palette_data, uint8_t minimum_hue) {
-    if (sharkoon_flow_cache_valid &&
-        sharkoon_flow_cache_palette == palette_data &&
+    if (sharkoon_flow_cache_palette == palette_data &&
         sharkoon_flow_cache_minimum_hue == minimum_hue) {
         return;
     }
@@ -339,7 +342,6 @@ static void sharkoon_update_flow_rgb_cache(const uint16_t *palette_data, uint8_t
 
     sharkoon_flow_cache_palette     = palette_data;
     sharkoon_flow_cache_minimum_hue = minimum_hue;
-    sharkoon_flow_cache_valid       = true;
 }
 
 /*
@@ -349,19 +351,17 @@ static void sharkoon_update_flow_rgb_cache(const uint16_t *palette_data, uint8_t
  * danach nur noch den Snapshot.
  */
 typedef struct {
-    bool    direct_stream_active;
     uint16_t flow_time;
+    bool    direct_stream_active;
     int8_t  rot_c;
     int8_t  rot_s;
     uint8_t omega;
-    uint8_t sparkle_time;
     uint8_t effective_value;
     uint8_t hit_count;
     uint8_t reactive_value[RGB_MATRIX_LED_COUNT];
 } sharkoon_hybrid_frame_t;
 
 static sharkoon_hybrid_frame_t sharkoon_hybrid_frame;
-static bool                    sharkoon_hybrid_reactive_nonzero;
 static bool                    sharkoon_hybrid_reactive_wake_pending;
 
 /*
@@ -474,9 +474,6 @@ static void sharkoon_prepare_hybrid_frame(void) {
             &sharkoon_sin8_lut[(uint8_t)sharkoon_hybrid_frame.flow_time]
         ) / 4;
 
-    sharkoon_hybrid_frame.sparkle_time =
-        (uint8_t)sharkoon_hybrid_frame.flow_time;
-
     /*
      * =========================================================
      * LOW-BRIGHTNESS / GLOBAL BRIGHTNESS STATE
@@ -516,8 +513,12 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * can be compacted out of QMK's source buffer when the frame snapshot is
      * known to be current.
      */
-    sharkoon_hybrid_frame.hit_count = 0;
-
+    /*
+     * Keep the previous frame's count until the new field is complete. Its
+     * nonzero state already says whether an old reactive field needs clearing.
+     * The new count also identifies the first contributing hit, so neither a
+     * persistent nonzero flag nor a separate local cleared flag is needed.
+     */
     const uint8_t source_hit_count = g_last_hit_tracker.count;
 
     /*
@@ -526,13 +527,13 @@ static void sharkoon_prepare_hybrid_frame(void) {
      * that is the first frame where source compaction could matter anyway.
      */
     if (source_hit_count == 0) {
-        if (sharkoon_hybrid_reactive_nonzero) {
+        if (sharkoon_hybrid_frame.hit_count != 0) {
             memset(
                 sharkoon_hybrid_frame.reactive_value,
                 0,
                 sizeof(sharkoon_hybrid_frame.reactive_value)
             );
-            sharkoon_hybrid_reactive_nonzero = false;
+            sharkoon_hybrid_frame.hit_count = 0;
         }
         return;
     }
@@ -542,7 +543,7 @@ static void sharkoon_prepare_hybrid_frame(void) {
 
     const uint8_t reactive_scale = 1 + speed / 4;
     uint8_t       dead_prefix    = 0;
-    bool          field_cleared  = false;
+    uint8_t       hit_count      = 0;
 
     for (uint8_t hit = source_hit_count; hit > 0; --hit) {
         const uint8_t j = hit - 1u;
@@ -587,16 +588,15 @@ static void sharkoon_prepare_hybrid_frame(void) {
             break;
         }
 
-        if (!field_cleared) {
+        if (hit_count == 0) {
             memset(
                 sharkoon_hybrid_frame.reactive_value,
                 0,
                 sizeof(sharkoon_hybrid_frame.reactive_value)
             );
-            field_cleared = true;
         }
 
-        ++sharkoon_hybrid_frame.hit_count;
+        ++hit_count;
 
         const uint8_t source_led = g_last_hit_tracker.index[j];
 
@@ -634,16 +634,14 @@ static void sharkoon_prepare_hybrid_frame(void) {
         }
     }
 
-    if (sharkoon_hybrid_frame.hit_count != 0) {
-        sharkoon_hybrid_reactive_nonzero = true;
-    } else if (sharkoon_hybrid_reactive_nonzero) {
+    if (hit_count == 0 && sharkoon_hybrid_frame.hit_count != 0) {
         memset(
             sharkoon_hybrid_frame.reactive_value,
             0,
             sizeof(sharkoon_hybrid_frame.reactive_value)
         );
-        sharkoon_hybrid_reactive_nonzero = false;
     }
+    sharkoon_hybrid_frame.hit_count = hit_count;
 
     /*
      * A matching event after the snapshot fences source mutation for exactly
@@ -729,7 +727,7 @@ static bool VIALRGB_DIRECT(effect_params_t *params) {
     const int8_t   rot_c             = sharkoon_hybrid_frame.rot_c;
     const int8_t   rot_s             = sharkoon_hybrid_frame.rot_s;
     const uint8_t  omega             = sharkoon_hybrid_frame.omega;
-    const uint8_t  sparkle_time      = sharkoon_hybrid_frame.sparkle_time;
+    const uint8_t  sparkle_time      = (uint8_t)flow_time;
     const uint8_t  effective_value   = sharkoon_hybrid_frame.effective_value;
     const bool     reactive_active   = sharkoon_hybrid_frame.hit_count != 0;
 
