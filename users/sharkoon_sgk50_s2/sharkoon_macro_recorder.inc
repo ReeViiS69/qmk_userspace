@@ -12,12 +12,9 @@
 #define SHARKOON_MACRO_RECORDING_SIZE (SHARKOON_MACRO_MAX_ACTIONS * 2 * SHARKOON_MACRO_EVENT_SIZE)
 #define SHARKOON_MACRO_IO_CHUNK_SIZE  64
 
-static bool    sharkoon_recording          = false;
-static bool    sharkoon_accept_new_presses = false;
-static uint8_t sharkoon_recording_slot     = 0;
+static uint8_t sharkoon_recording_state = 0; // 0 = inactive, otherwise slot + 1
 static uint8_t sharkoon_action_count       = 0;
 static uint8_t sharkoon_recording_length   = 0;
-static uint8_t sharkoon_pressed_count      = 0;
 static uint8_t sharkoon_recording_data[SHARKOON_MACRO_RECORDING_SIZE];
 static uint8_t sharkoon_recorded_key[MATRIX_ROWS][MATRIX_COLS];
 
@@ -27,33 +24,23 @@ static void sharkoon_rgb_macro_recording_finished(void);
 #endif
 
 static inline __attribute__((always_inline)) bool sharkoon_macro_recording_active(void) {
-    return sharkoon_recording;
+    return sharkoon_recording_state != 0;
 }
 
-static bool sharkoon_append_event(uint8_t event_type, uint8_t keycode) {
-    if ((uint16_t)(sharkoon_recording_length + SHARKOON_MACRO_EVENT_SIZE) > (uint16_t)sizeof(sharkoon_recording_data)) {
-        return false;
-    }
-
+static void sharkoon_append_event(uint8_t event_type, uint8_t keycode) {
     sharkoon_recording_data[sharkoon_recording_length++] = SS_QMK_PREFIX;
     sharkoon_recording_data[sharkoon_recording_length++] = event_type;
     sharkoon_recording_data[sharkoon_recording_length++] = keycode;
-    return true;
 }
 
 static void sharkoon_start_recording(uint8_t slot, uint8_t row, uint8_t col) {
-    sharkoon_recording          = true;
-    sharkoon_accept_new_presses = true;
-    sharkoon_recording_slot     = slot;
+    sharkoon_recording_state = slot + 1;
     sharkoon_action_count       = 0;
     sharkoon_recording_length   = 0;
-    sharkoon_pressed_count      = 0;
 
 #ifdef RGB_MATRIX_ENABLE
     sharkoon_rgb_macro_recording_started(row, col);
 #endif
-
-    memset(sharkoon_recorded_key, 0, sizeof(sharkoon_recorded_key));
 }
 
 static bool sharkoon_find_macro_bounds(uint8_t slot, uint16_t buffer_size, uint16_t *macro_start, uint16_t *macro_end, uint16_t *used_end) {
@@ -198,7 +185,9 @@ static void sharkoon_save_recording(void) {
     uint16_t macro_end   = 0;
     uint16_t used_end    = 0;
 
-    if (!sharkoon_find_macro_bounds(sharkoon_recording_slot, buffer_size, &macro_start, &macro_end, &used_end)) {
+    const uint8_t recording_slot = sharkoon_recording_state - 1;
+
+    if (!sharkoon_find_macro_bounds(recording_slot, buffer_size, &macro_start, &macro_end, &used_end)) {
         return;
     }
 
@@ -272,11 +261,10 @@ static void sharkoon_release_recorded_keys(void) {
         }
     }
 
-    sharkoon_pressed_count = 0;
 }
 
 static void sharkoon_finish_recording(bool force_release) {
-    if (!sharkoon_recording) {
+    if (sharkoon_recording_state == 0) {
         return;
     }
 
@@ -286,8 +274,7 @@ static void sharkoon_finish_recording(bool force_release) {
 
     sharkoon_save_recording();
 
-    sharkoon_recording          = false;
-    sharkoon_accept_new_presses = false;
+    sharkoon_recording_state = 0;
 #ifdef RGB_MATRIX_ENABLE
     sharkoon_rgb_macro_recording_finished();
 #endif
@@ -321,14 +308,14 @@ static inline __attribute__((always_inline)) void sharkoon_macro_record_start_pr
         layer_off(3);
         sharkoon_consume_active_oneshot_layer();
 
-        if (!sharkoon_recording) {
+        if (sharkoon_recording_state == 0) {
             sharkoon_start_recording(keycode == REC_M0 ? 0 : 1, record->event.key.row, record->event.key.col);
         }
     }
 }
 
 static inline __attribute__((always_inline)) void sharkoon_macro_record_stop_process(keyrecord_t *record) {
-    if (record->event.pressed && sharkoon_recording) {
+    if (record->event.pressed && sharkoon_recording_state != 0) {
         sharkoon_finish_recording(true);
     }
 }
@@ -347,18 +334,12 @@ static inline __attribute__((always_inline)) bool sharkoon_macro_recorder_captur
         // Only 8-bit keycodes can be represented by QMK's send-string DOWN/UP
         // commands. Layer keys and other 16-bit QMK controls therefore pass
         // through normally but are intentionally not recorded.
-        if (sharkoon_accept_new_presses && IS_ANY(keycode) && sharkoon_recorded_key[row][col] == 0) {
+        if (sharkoon_action_count < SHARKOON_MACRO_MAX_ACTIONS && IS_ANY(keycode) && sharkoon_recorded_key[row][col] == 0) {
             const uint8_t basic_keycode = (uint8_t)keycode;
 
-            if (sharkoon_append_event(SS_DOWN_CODE, basic_keycode)) {
-                sharkoon_recorded_key[row][col] = basic_keycode;
-                ++sharkoon_pressed_count;
-                ++sharkoon_action_count;
-
-                if (sharkoon_action_count >= SHARKOON_MACRO_MAX_ACTIONS) {
-                    sharkoon_accept_new_presses = false;
-                }
-            }
+            sharkoon_append_event(SS_DOWN_CODE, basic_keycode);
+            sharkoon_recorded_key[row][col] = basic_keycode;
+            ++sharkoon_action_count;
         }
 
         return true;
@@ -369,9 +350,7 @@ static inline __attribute__((always_inline)) bool sharkoon_macro_recorder_captur
         sharkoon_append_event(SS_UP_CODE, recorded_keycode);
         sharkoon_recorded_key[row][col] = 0;
 
-        --sharkoon_pressed_count;
-
-        if (!sharkoon_accept_new_presses && sharkoon_pressed_count == 0) {
+        if (sharkoon_recording_length == SHARKOON_MACRO_RECORDING_SIZE) {
             sharkoon_finish_recording(false);
         }
     }
