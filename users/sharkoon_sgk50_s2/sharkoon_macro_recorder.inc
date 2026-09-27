@@ -303,9 +303,7 @@ static void sharkoon_consume_active_oneshot_layer(void) {
     reset_oneshot_layer();
 }
 
-static inline __attribute__((always_inline)) void sharkoon_macro_select_process(keyrecord_t *record, uint8_t row, uint8_t col) {
-    sharkoon_set_suppress_release(row, col);
-
+static inline __attribute__((always_inline)) void sharkoon_macro_select_process(keyrecord_t *record) {
     if (record->event.pressed) {
         if (is_layer_locked(1) || layer_state_is(3)) {
             layer_lock_off(1);
@@ -318,8 +316,6 @@ static inline __attribute__((always_inline)) void sharkoon_macro_select_process(
 }
 
 static inline __attribute__((always_inline)) void sharkoon_macro_record_start_process(uint16_t keycode, keyrecord_t *record, uint8_t row, uint8_t col) {
-    sharkoon_set_suppress_release(row, col);
-
     if (record->event.pressed) {
         layer_lock_off(1);
         layer_off(3);
@@ -331,9 +327,7 @@ static inline __attribute__((always_inline)) void sharkoon_macro_record_start_pr
     }
 }
 
-static inline __attribute__((always_inline)) void sharkoon_macro_record_stop_process(keyrecord_t *record, uint8_t row, uint8_t col) {
-    sharkoon_set_suppress_release(row, col);
-
+static inline __attribute__((always_inline)) void sharkoon_macro_record_stop_process(keyrecord_t *record) {
     if (record->event.pressed && sharkoon_recording) {
         sharkoon_finish_recording(true);
     }
@@ -343,9 +337,6 @@ static inline __attribute__((always_inline)) bool sharkoon_macro_recorder_captur
     // VIA macro playback keys are controls, not recordable input. Swallow them
     // while recording so a stored macro cannot recursively play into a capture.
     if (keycode >= QK_MACRO && keycode <= QK_MACRO_MAX) {
-        if (record->event.pressed) {
-            sharkoon_set_suppress_release(row, col);
-        }
         return false;
     }
 

@@ -45,7 +45,6 @@ enum custom_keycodes {
     RGB_DARK = QK_USER_5,
 };
 
-#include "sharkoon_key_event_guard.inc"
 #include "sharkoon_macro_recorder.inc"
 
 #ifdef RGB_MATRIX_ENABLE
@@ -113,22 +112,26 @@ bool pre_process_record_user(uint16_t keycode, keyrecord_t *record) {
 }
 #endif
 
+static inline __attribute__((always_inline)) uint8_t sharkoon_next_unicode_typing_mode(uint8_t mode) {
+    switch (mode) {
+        case UCTM_NO_MODE:
+            return UCTM_AUSSIE;
+        case UCTM_AUSSIE:
+            return UCTM_ZALGO;
+        case UCTM_ZALGO:
+            return UCTM_SUPER;
+        default:
+            return UCTM_NO_MODE;
+    }
+}
+
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     const uint8_t row = record->event.key.row;
     const uint8_t col = record->event.key.col;
 
-    // A custom control key can resolve to a different keycode on release after
-    // changing the layer state. Suppress that physical release by matrix
-    // position so no release from the newly exposed key can escape to the host.
-    if (!record->event.pressed && sharkoon_take_suppress_release(row, col)) {
-        return false;
-    }
-
     switch (keycode) {
 #ifdef RGB_MATRIX_ENABLE
         case RGB_DARK:
-            sharkoon_set_suppress_release(row, col);
-
             if (record->event.pressed) {
                 sharkoon_toggle_rgb_darkmode();
             }
@@ -143,29 +146,9 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 #endif
 
         case UNICODE_TYPING_CYCLE:
-            sharkoon_set_suppress_release(row, col);
-
             if (record->event.pressed) {
-                static const uint8_t modes[] = {
-                    UCTM_NO_MODE,
-                    UCTM_AUSSIE,
-                    UCTM_ZALGO,
-                    UCTM_SUPER,
-                };
-
-                uint8_t current = get_unicode_typing_mode();
-                uint8_t next_index = 0;
-
-                for (uint8_t i = 0; i < ARRAY_SIZE(modes); i++) {
-                    if (modes[i] == current) {
-                        next_index = (i + 1) % ARRAY_SIZE(modes);
-                        break;
-                    }
-                }
-
-                const uint8_t next_mode = modes[next_index];
+                const uint8_t next_mode = sharkoon_next_unicode_typing_mode(get_unicode_typing_mode());
                 set_unicode_typing_mode(next_mode);
-
 #ifdef RGB_MATRIX_ENABLE
                 sharkoon_rgb_unicode_mode_changed(next_mode);
 #endif
@@ -174,7 +157,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             return false;
 
         case MACRO_SELECT:
-            sharkoon_macro_select_process(record, row, col);
+            sharkoon_macro_select_process(record);
             return false;
 
         case REC_M0:
@@ -183,7 +166,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             return false;
 
         case REC_STOP:
-            sharkoon_macro_record_stop_process(record, row, col);
+            sharkoon_macro_record_stop_process(record);
             return false;
 
         default:
