@@ -14,8 +14,14 @@ static uint16_t sharkoon_macro_blink_timer    = 0;
 static uint8_t  sharkoon_recording_led        = NO_LED;
 static uint8_t  sharkoon_caps_lock_led        = NO_LED;
 static uint8_t  sharkoon_unicode_typing_led   = NO_LED;
-static bool     sharkoon_unicode_led_active   = false;
-static rgb_t    sharkoon_unicode_led_color    = {0, 0, 0};
+enum {
+    SHARKOON_UNICODE_LED_OFF = 0,
+    SHARKOON_UNICODE_LED_RED,
+    SHARKOON_UNICODE_LED_GREEN,
+    SHARKOON_UNICODE_LED_BLUE,
+};
+
+static uint8_t  sharkoon_unicode_led_channel  = SHARKOON_UNICODE_LED_OFF;
 static bool     sharkoon_caps_lock_active     = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
@@ -37,10 +43,6 @@ static void sharkoon_macro_layer_add_led(uint8_t layer, uint8_t led) {
 }
 
 static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, uint8_t b) {
-    if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT) {
-        return;
-    }
-
     for (uint8_t word = 0; word < SHARKOON_LED_BITSET_WORDS; ++word) {
         uint32_t bits = sharkoon_macro_layer_leds[layer][word];
 
@@ -48,9 +50,7 @@ static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, u
             const uint8_t bit = (uint8_t)__builtin_ctz(bits);
             const uint8_t led = (uint8_t)(word * SHARKOON_BITSET_WORD_BITS + bit);
 
-            if (led < RGB_MATRIX_LED_COUNT) {
-                rgb_matrix_set_color(led, r, g, b);
-            }
+            rgb_matrix_set_color(led, r, g, b);
 
             bits &= bits - 1u;
         }
@@ -58,20 +58,24 @@ static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, u
 }
 
 static void sharkoon_clear_macro_select_leds(void) {
+    if (sharkoon_macro_select_layer == SHARKOON_NO_LAYER) {
+        return;
+    }
+
     sharkoon_set_macro_layer_leds(sharkoon_macro_select_layer, 0, 0, 0);
 }
 
 static void sharkoon_render_unicode_typing_led(void) {
-    if (!sharkoon_unicode_led_active || sharkoon_unicode_typing_led == NO_LED) {
+    if (sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_OFF || sharkoon_unicode_typing_led == NO_LED) {
         return;
     }
 
     const uint8_t v = rgb_matrix_config.hsv.v;
     rgb_matrix_set_color(
         sharkoon_unicode_typing_led,
-        sharkoon_unicode_led_color.r ? v : 0,
-        sharkoon_unicode_led_color.g ? v : 0,
-        sharkoon_unicode_led_color.b ? v : 0
+        sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_RED ? v : 0,
+        sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_GREEN ? v : 0,
+        sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_BLUE ? v : 0
     );
 }
 
@@ -85,9 +89,7 @@ static void sharkoon_render_status_leds(void) {
 }
 
 static bool sharkoon_macro_lighting_active(void) {
-    return sharkoon_macro_recording_active() ||
-           (sharkoon_macro_select_layer < DYNAMIC_KEYMAP_LAYER_COUNT &&
-            sharkoon_macro_layer_led_count[sharkoon_macro_select_layer] > 0);
+    return sharkoon_macro_recording_active() || sharkoon_macro_select_layer != SHARKOON_NO_LAYER;
 }
 
 #include "sharkoon_darkmode.inc"
@@ -98,7 +100,8 @@ static void sharkoon_start_macro_blink(void) {
 }
 
 static void sharkoon_render_macro_leds(void) {
-    if (!sharkoon_macro_lighting_active()) {
+    const bool recording = sharkoon_macro_recording_active();
+    if (!recording && sharkoon_macro_select_layer == SHARKOON_NO_LAYER) {
         return;
     }
 
@@ -112,7 +115,7 @@ static void sharkoon_render_macro_leds(void) {
         color = hsv_to_rgb(rgb_matrix_config.hsv);
     }
 
-    if (sharkoon_macro_recording_active()) {
+    if (recording) {
         if (sharkoon_recording_led != NO_LED) {
             rgb_matrix_set_color(sharkoon_recording_led, color.r, color.g, color.b);
         }
@@ -278,23 +281,20 @@ static void sharkoon_rgb_macro_recording_finished(void) {
 static void sharkoon_rgb_unicode_mode_changed(uint8_t mode) {
     switch (mode) {
         case UCTM_AUSSIE:
-            sharkoon_unicode_led_active = true;
-            sharkoon_unicode_led_color  = (rgb_t){255, 0, 0};
+            sharkoon_unicode_led_channel = SHARKOON_UNICODE_LED_RED;
             break;
 
         case UCTM_ZALGO:
-            sharkoon_unicode_led_active = true;
-            sharkoon_unicode_led_color  = (rgb_t){0, 255, 0};
+            sharkoon_unicode_led_channel = SHARKOON_UNICODE_LED_GREEN;
             break;
 
         case UCTM_SUPER:
-            sharkoon_unicode_led_active = true;
-            sharkoon_unicode_led_color  = (rgb_t){0, 0, 255};
+            sharkoon_unicode_led_channel = SHARKOON_UNICODE_LED_BLUE;
             break;
 
         case UCTM_NO_MODE:
         default:
-            sharkoon_unicode_led_active = false;
+            sharkoon_unicode_led_channel = SHARKOON_UNICODE_LED_OFF;
             break;
     }
 
