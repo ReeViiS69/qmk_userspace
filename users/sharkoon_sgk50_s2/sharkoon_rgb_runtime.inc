@@ -1,4 +1,49 @@
 /*
+ * Sharkoon RGB runtime.
+ *
+ * Owns board-specific disabled LEDs, status/macro indicators, Darkmode and
+ * VIA/Vial RGB command observation. The custom RGB renderers live separately
+ * in sharkoon_rgb_effects.inc.
+ */
+
+#ifdef RGB_MATRIX_ENABLE
+#include "ws2812.h"
+
+/*
+ * =============================================================
+ * BOARD-SPECIFIC DISABLED LEDS
+ * =============================================================
+ */
+static const uint8_t sharkoon_disabled_leds[] = {
+    7, 8, 9, 10, 11, 12,
+    38, 39, 40, 41,
+    75, 76,
+    78, 79, 80, 81,
+};
+
+static void sharkoon_apply_disabled_led_flags(void) {
+    for (uint8_t i = 0; i < sizeof(sharkoon_disabled_leds) / sizeof(sharkoon_disabled_leds[0]); ++i) {
+        const uint8_t led = sharkoon_disabled_leds[i];
+
+        if (led < RGB_MATRIX_LED_COUNT) {
+            g_led_config.flags[led] = LED_FLAG_NONE;
+        }
+    }
+}
+
+static void sharkoon_clear_disabled_leds(void) {
+    for (uint8_t i = 0; i < sizeof(sharkoon_disabled_leds) / sizeof(sharkoon_disabled_leds[0]); ++i) {
+        const uint8_t led = sharkoon_disabled_leds[i];
+        ws2812_set_color(led, 0, 0, 0);
+    }
+}
+
+/*
+ * =============================================================
+ * STATUS / MACRO INDICATORS + DARKMODE
+ * =============================================================
+ */
+/*
  * Sharkoon RGB indicators and macro lighting.
  *
  * Owns LED discovery/cache, Caps/Unicode overlays and macro-selection/recording
@@ -7,7 +52,8 @@
 
 #define SHARKOON_MACRO_LED_BLINK_MS 400
 #define SHARKOON_NO_LAYER           0xFF
-#define SHARKOON_LED_BITSET_WORDS   ((RGB_MATRIX_LED_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
+#define SHARKOON_BITSET_WORD_BITS     32u
+#define SHARKOON_LED_BITSET_WORDS     ((RGB_MATRIX_LED_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
 
 static bool     sharkoon_macro_blink_on       = false;
 static uint16_t sharkoon_macro_blink_timer    = 0;
@@ -92,7 +138,100 @@ static bool sharkoon_macro_lighting_active(void) {
     return sharkoon_macro_recording_active() || sharkoon_macro_select_layer != SHARKOON_NO_LAYER;
 }
 
-#include "sharkoon_darkmode.inc"
+/*
+ * =============================================================
+ * DARKMODE / SEMI-OFF CONTROL
+ * =============================================================
+ */
+/*
+ * Sharkoon RGB Darkmode / semi-off control.
+ *
+ * Idle Darkmode keeps RGB Matrix disabled. It wakes RGB only while macro
+ * lighting needs the normal indicator render loop, then returns to semi-off.
+ */
+
+static bool sharkoon_rgb_darkmode = false;
+
+static bool sharkoon_darkmode_is_active(void) {
+    return sharkoon_rgb_darkmode;
+}
+
+static void sharkoon_darkmode_idle(void) {
+    rgb_matrix_disable_noeeprom();
+    rgb_matrix_task(); // STARTING -> RENDERING
+    rgb_matrix_task(); // RENDERING -> FLUSHING, buffer is black
+    sharkoon_render_status_leds();
+    rgb_matrix_task(); // flush black + status LEDs once
+}
+
+static void sharkoon_darkmode_refresh(void) {
+    if (!sharkoon_rgb_darkmode || rgb_matrix_is_enabled()) {
+        return;
+    }
+
+    // RGB Matrix is sleeping; update only the event-driven status LEDs.
+    if (sharkoon_caps_lock_led != NO_LED) {
+        rgb_matrix_set_color(sharkoon_caps_lock_led, 0, 0, 0);
+    }
+    if (sharkoon_unicode_typing_led != NO_LED) {
+        rgb_matrix_set_color(sharkoon_unicode_typing_led, 0, 0, 0);
+    }
+
+    sharkoon_render_status_leds();
+    rgb_matrix_update_pwm_buffers();
+}
+
+static void sharkoon_update_darkmode_rgb_state(void) {
+    if (!sharkoon_rgb_darkmode) {
+        return;
+    }
+
+    if (sharkoon_macro_lighting_active()) {
+        if (!rgb_matrix_is_enabled()) {
+            rgb_matrix_enable_noeeprom();
+        }
+    } else if (rgb_matrix_is_enabled()) {
+        sharkoon_darkmode_idle();
+    }
+}
+
+static void sharkoon_toggle_rgb_darkmode(void) {
+    if (sharkoon_rgb_darkmode) {
+        sharkoon_rgb_darkmode = false;
+        if (!rgb_matrix_is_enabled()) {
+            rgb_matrix_enable_noeeprom();
+        }
+        return;
+    }
+
+    if (!rgb_matrix_is_enabled()) {
+        rgb_matrix_enable_noeeprom();
+        return;
+    }
+
+    sharkoon_rgb_darkmode = true;
+    if (!sharkoon_macro_lighting_active()) {
+        sharkoon_darkmode_idle();
+    }
+}
+
+/*
+ * RM_TOGG while Darkmode is active must always leave RGB enabled, including
+ * the temporary macro-blink state where RGB Matrix is already awake.
+ * Return true when the key event is fully handled here.
+ */
+static bool sharkoon_darkmode_handle_rm_togg(void) {
+    if (!sharkoon_rgb_darkmode) {
+        return false;
+    }
+
+    sharkoon_rgb_darkmode = false;
+    if (rgb_matrix_is_enabled()) {
+        return true;
+    }
+
+    return false;
+}
 
 static void sharkoon_start_macro_blink(void) {
     sharkoon_macro_blink_on    = true;
@@ -312,3 +451,49 @@ bool rgb_matrix_indicators_user(void) {
     sharkoon_render_macro_leds();
     return true;
 }
+
+#endif // RGB_MATRIX_ENABLE
+
+/*
+ * =============================================================
+ * VIA / VIAL RGB COMMAND OBSERVATION
+ * =============================================================
+ */
+#ifdef VIALRGB_DIRECT_ENABLE
+void sharkoon_direct_mark_dirty_packet(const uint8_t *data, uint8_t length);
+
+static uint32_t sharkoon_direct_last_packet = 0;
+static bool     sharkoon_direct_seen        = false;
+
+bool sharkoon_direct_stream_active(void) {
+    if (!sharkoon_direct_seen) {
+        return false;
+    }
+
+    if (timer_elapsed32(sharkoon_direct_last_packet) >= 250) {
+        sharkoon_direct_seen = false;
+        return false;
+    }
+
+    return true;
+}
+#endif
+
+#ifdef VIA_ENABLE
+bool via_command_kb(uint8_t *data, uint8_t length) {
+#ifdef RGB_MATRIX_ENABLE
+    sharkoon_rgb_observe_via_command(data, length);
+#endif
+
+#ifdef VIALRGB_DIRECT_ENABLE
+    if (length >= 2 && data[0] == id_custom_set_value && data[1] == vialrgb_direct_fastset) {
+        sharkoon_direct_mark_dirty_packet(data, length);
+        sharkoon_direct_last_packet = timer_read32();
+        sharkoon_direct_seen        = true;
+    }
+#endif
+
+    // Never consume VIA/Vial traffic here; the core must process it normally.
+    return false;
+}
+#endif

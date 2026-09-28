@@ -35,8 +35,7 @@ void sharkoon_perf_rgb_take_snapshot(sharkoon_perf_rgb_stats_t *out) {
 #    endif
 #endif
 
-#include "sharkoon_solid_reactive.inc"
-#include "sharkoon_palettefx.inc"
+#include "sharkoon_rgb_effects.inc"
 
 #ifdef RGB_MATRIX_CUSTOM_EFFECT_IMPLS
 

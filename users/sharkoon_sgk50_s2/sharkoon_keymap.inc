@@ -34,8 +34,6 @@ socd_cleaner_t socd_opposing_pairs[] = {
     {{KC_A, KC_D}, SOCD_CLEANER_LAST},
     {{MS_LEFT,   MS_RGHT,}, SOCD_CLEANER_LAST},
 };
-#define SHARKOON_BITSET_WORD_BITS       32u
-
 enum custom_keycodes {
     REC_M0 = QK_USER_0,
     REC_M1 = QK_USER_1,
@@ -47,11 +45,7 @@ enum custom_keycodes {
 
 #include "sharkoon_macro_recorder.inc"
 
-#ifdef RGB_MATRIX_ENABLE
-#    include "sharkoon_rgb_indicators.inc"
-#endif
-
-#include "sharkoon_via_rgb.inc"
+#include "sharkoon_rgb_runtime.inc"
 
 #ifdef SHARKOON_PERF_BENCHMARK
 #    include "sharkoon_perf_benchmark.inc"

@@ -6,8 +6,6 @@ OPT_DEFS += -DWB32_DMA_REQUIRED
 MCU_LDSCRIPT = WB32FQ95xC
 OPT_DEFS += -DWB32FQ95xC
 
-SRC += sharkoon_sgk50_s2.c
-
 LTO_ENABLE = yes
 
 # Common QMK features
