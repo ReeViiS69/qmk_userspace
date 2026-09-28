@@ -300,6 +300,17 @@ static void ws2812_fill_block(uint32_t *buf, const uint8_t *src, uint32_t byte_c
 
 }
 
+static inline void ws2812_disable_dma_for_recovery(void) {
+    /* dmaStreamDisable() stops the channel and clears pending status, but also
+     * clears all interrupt masks. Restore our fixed TFR/ERR configuration here
+     * while the caller still holds its thread/ISR lock. The channel stays off.
+     * This keeps recovery self-contained; normal frame starts need no repair.
+     */
+    dmaStreamDisable(ws2812_dma_stream);
+    dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_TFR);
+    dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_ERR);
+}
+
 /**
  * @brief Force-abort an in-progress DMA transfer (thread context only)
  *
@@ -315,9 +326,9 @@ static void ws2812_abort_transfer(void) {
     if (ws2812_transfer_active) {
 
         /* This is an intentional abort, so clearing pending DMA status is
-         * correct here. dmaStreamDisable() also disables interrupt masks and
-         * clears raw status; the next frame restores TFR/ERR masks explicitly. */
-        dmaStreamDisable(ws2812_dma_stream);
+         * correct here. Restore the fixed interrupt configuration as part of
+         * this recovery instead of repairing it on every later frame. */
+        ws2812_disable_dma_for_recovery();
         gptStopTimerI(ws2812_gpt);
         WS2812_GPIO_PORT->BSRR = BSRR_RESET;
         ws2812_transfer_active = false;
@@ -351,7 +362,7 @@ static inline void ws2812_finish_transfer_from_isr(bool disable_dma) {
     if (disable_dma) {
         /* ERR is the last status type inspected by WB32 dmaServeInterrupt(),
          * so clearing DMA status here cannot hide a later status check. */
-        dmaStreamDisable(ws2812_dma_stream);
+        ws2812_disable_dma_for_recovery();
     }
 
     gptStopTimerI(ws2812_gpt);
@@ -660,11 +671,6 @@ static THD_FUNCTION(ws2812_worker, arg) {
 
         *ws2812_dma_sar_reg  = (uint32_t)ws2812_buf[0];
         *ws2812_dma_ctlh_reg = blk0_size & WB32_DMA_CHCFG_SIZE_MASK;
-
-        /* Restore interrupt masks in case the previous transfer ended through
-         * the DMA-disable error/abort path. Normal completion leaves them enabled. */
-        dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_TFR);
-        dmaStreamEnableInterrupt(ws2812_dma_stream, WB32_DMAC_IT_ERR);
 
         /* Suppress both UG-triggered and stale-handshake DMA at frame start:
          * 1. Disable UDE so gpt_lld_start_timer()'s EGR=UG can't generate DMA request
