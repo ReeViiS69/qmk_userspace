@@ -15,10 +15,12 @@
  * =============================================================
  */
 static const uint8_t sharkoon_disabled_leds[] = {
-    7, 8, 9, 10, 11, 12,
-    38, 39, 40, 41,
-    75, 76,
-    78, 79, 80, 81,
+81, 80,            76,  // QK_MACRO_0, QK_MACRO_1, RM_TOGG
+                   75,  // TG(2)
+       44, 43,     41,  // KC_WSCH, MS_UP, KC_MPLY
+       38, 39, 40,      // MS_LEFT, MS_DOWN, MS_RGHT
+           11, 10,  9,  // MS_BTN4, MS_BTN5, MS_BTN2
+ 4,             8,      // MS_BTN1, MS_BTN3
 };
 
 static void sharkoon_apply_disabled_led_flags(void) {
