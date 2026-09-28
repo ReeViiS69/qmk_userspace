@@ -28,4 +28,7 @@ REPEAT_KEY_ENABLE = yes
 CONSOLE_ENABLE = no
 KEYBOARD_SHARED_EP = no
 
-DEBOUNCE_TYPE = asym_eager_defer_pk
+# DEBOUNCE_TYPE = asym_eager_defer_pk
+# DEBOUNCE_TYPE = sym_eager_pk
+DEBOUNCE_TYPE = sym_defer_pk
+

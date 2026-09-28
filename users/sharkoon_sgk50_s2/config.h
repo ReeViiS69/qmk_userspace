@@ -35,15 +35,28 @@
 #undef DYNAMIC_KEYMAP_EEPROM_MAX_ADDR
 #define DYNAMIC_KEYMAP_EEPROM_MAX_ADDR 4095
 
-/*
- * Keep NKRO enabled by default
- */
+#define DEBOUNCE 4
+
+// Keep NKRO enabled by default
 #define NKRO_DEFAULT_ON true
+
+// Mouse Keys - Accelerated Mode
+#define MOUSEKEY_DELAY              20
+#define MOUSEKEY_INTERVAL           20
+#define MOUSEKEY_MOVE_DELTA          1
+#define MOUSEKEY_MAX_SPEED          80
+#define MOUSEKEY_TIME_TO_MAX        45
+
+#define MOUSEKEY_WHEEL_DELAY        20
+#define MOUSEKEY_WHEEL_INTERVAL    100
+#define MOUSEKEY_WHEEL_DELTA         1
+#define MOUSEKEY_WHEEL_MAX_SPEED     2
+#define MOUSEKEY_WHEEL_TIME_TO_MAX   6
 
 //enable socd for mousekeys aswell, custom setting, not a socd default
 #define SOCD_CLEANER_MOUSEKEY_ENABLE
 #define SOCD_CLEANER_RELEASE_DELAY_MIN_MS 2
-#define SOCD_CLEANER_RELEASE_DELAY_MAX_MS 50
+#define SOCD_CLEANER_RELEASE_DELAY_MAX_MS 25
 /*
  * Unicode typing uses WinCompose on Windows.
  * WinCompose must be installed on the host for Unicode output to work.
