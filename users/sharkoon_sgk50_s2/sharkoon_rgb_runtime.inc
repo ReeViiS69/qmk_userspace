@@ -71,6 +71,7 @@ enum {
 
 static uint8_t  sharkoon_unicode_led_channel  = SHARKOON_UNICODE_LED_OFF;
 static bool     sharkoon_caps_lock_active     = false;
+static bool     sharkoon_caps_word_active     = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
 static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
@@ -130,9 +131,16 @@ static void sharkoon_render_unicode_typing_led(void) {
 static void sharkoon_render_status_leds(void) {
     sharkoon_render_unicode_typing_led();
 
-    if (sharkoon_caps_lock_active && sharkoon_caps_lock_led != NO_LED) {
-        const uint8_t brightness = rgb_matrix_config.hsv.v;
+    if (sharkoon_caps_lock_led == NO_LED) {
+        return;
+    }
+
+    const uint8_t brightness = rgb_matrix_config.hsv.v;
+
+    if (sharkoon_caps_lock_active) {
         rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
+    } else if (sharkoon_caps_word_active) {
+        rgb_matrix_set_color(sharkoon_caps_lock_led, 0, brightness, 0);
     }
 }
 
@@ -313,7 +321,8 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
 
             uint16_t effective_keycode = dynamic_keymap_get_keycode(0, row, col);
 
-            if (sharkoon_caps_lock_led == NO_LED && effective_keycode == KC_CAPS) {
+            if (sharkoon_caps_lock_led == NO_LED &&
+                (effective_keycode == KC_CAPS || effective_keycode == SHARKOON_CAPS_KEY)) {
                 sharkoon_caps_lock_led = led;
             }
 
@@ -392,6 +401,11 @@ static void sharkoon_rgb_indicators_init(void) {
 
 static void sharkoon_rgb_caps_lock_changed(bool active) {
     sharkoon_caps_lock_active = active;
+    sharkoon_darkmode_refresh();
+}
+
+static void sharkoon_rgb_caps_word_changed(bool active) {
+    sharkoon_caps_word_active = active;
     sharkoon_darkmode_refresh();
 }
 

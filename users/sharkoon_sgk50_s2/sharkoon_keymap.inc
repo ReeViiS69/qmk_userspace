@@ -33,6 +33,7 @@
 socd_cleaner_t socd_opposing_pairs[] = {
     {{KC_A, KC_D}, SOCD_CLEANER_LAST},
     {{MS_LEFT,   MS_RGHT,}, SOCD_CLEANER_LAST},
+	{{KC_TAB,   KC_2,}, SOCD_CLEANER_LAST},
 };
 enum custom_keycodes {
     REC_M0 = QK_USER_0,
@@ -44,6 +45,20 @@ enum custom_keycodes {
 };
 
 #include "sharkoon_macro_recorder.inc"
+
+#ifdef VIAL_TAP_DANCE_ENABLE
+#    define SHARKOON_CAPS_KEY TD(0)
+    void eeconfig_init_user(void) {
+        const vial_tap_dance_entry_t caps_td = {
+            .on_tap              = QK_CAPS_WORD_TOGGLE,
+            .on_hold             = KC_CAPS,
+            .custom_tapping_term = TAPPING_TERM,
+        };
+    dynamic_keymap_set_tap_dance(0, &caps_td);
+}
+#else
+#    define SHARKOON_CAPS_KEY KC_CAPS
+#endif
 
 #include "sharkoon_rgb_runtime.inc"
 
@@ -63,6 +78,10 @@ void keyboard_post_init_user(void) {
 bool led_update_user(led_t led_state) {
     sharkoon_rgb_caps_lock_changed(led_state.caps_lock);
     return true;
+}
+
+void caps_word_set_user(bool active) {
+    sharkoon_rgb_caps_word_changed(active);
 }
 
 layer_state_t layer_state_set_user(layer_state_t state) {
@@ -180,7 +199,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12, QK_MACRO_0, QK_MACRO_1,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
         KC_GRV,    KC_1,      KC_2,      KC_3,      KC_4,      KC_5,      KC_6,      KC_7,      KC_8,      KC_9,      KC_0,      KC_MINS,   KC_EQL,                KC_BSPC,    KC_INS,    KC_END,  KC_PGDN,     TG(2),
         KC_TAB,      KC_Q,      KC_W,      KC_E,      KC_R,      KC_T,      KC_Y,      KC_U,      KC_I,      KC_O,      KC_P,      KC_LBRC,   KC_RBRC,                         KC_WSCH,   MS_UP,   KC_PAUS,   KC_MPLY,
-        KC_CAPS,      KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,            KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
+SHARKOON_CAPS_KEY,    KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,            KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
         SC_LSPO,    KC_NUBS,   KC_Z,      KC_X,      KC_C,      KC_V,      KC_B,      KC_N,      KC_M,      KC_COMM,   KC_DOT,    KC_SLSH,       SC_RSPC,          KC_RSFT,    KC_UP,     MS_BTN4, MS_BTN5,   MS_BTN2,
         SC_LCPO,    KC_LGUI,    SC_LAPO,                                   KC_SPC,                                    SC_RAPC,LT(1, KC_INT3), SC_RCPC,   MS_BTN1,   KC_LEFT,   KC_DOWN,   KC_RGHT, MS_BTN3
     ),
