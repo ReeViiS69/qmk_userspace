@@ -54,14 +54,12 @@ static void sharkoon_clear_disabled_leds(void) {
 
 #define SHARKOON_MACRO_LED_BLINK_MS 400
 #define SHARKOON_NO_LAYER           0xFF
-#define SHARKOON_BITSET_WORD_BITS     32u
-#define SHARKOON_LED_BITSET_WORDS     ((RGB_MATRIX_LED_COUNT + SHARKOON_BITSET_WORD_BITS - 1u) / SHARKOON_BITSET_WORD_BITS)
+#define SHARKOON_MACRO_BITSET_WORD_BITS     32u
+#define SHARKOON_MACRO_LED_BITSET_WORDS     ((RGB_MATRIX_LED_COUNT + SHARKOON_MACRO_BITSET_WORD_BITS - 1u) / SHARKOON_MACRO_BITSET_WORD_BITS)
 
 static bool     sharkoon_macro_blink_on       = false;
 static uint16_t sharkoon_macro_blink_timer    = 0;
 static uint8_t  sharkoon_recording_led        = NO_LED;
-static uint8_t  sharkoon_caps_lock_led        = NO_LED;
-static uint8_t  sharkoon_unicode_typing_led   = NO_LED;
 enum {
     SHARKOON_UNICODE_LED_OFF = 0,
     SHARKOON_UNICODE_LED_RED,
@@ -74,16 +72,47 @@ static bool     sharkoon_caps_lock_active     = false;
 static bool     sharkoon_caps_word_active     = false;
 static uint8_t  sharkoon_macro_select_layer   = SHARKOON_NO_LAYER;
 static uint8_t  sharkoon_macro_layer_led_count[DYNAMIC_KEYMAP_LAYER_COUNT];
-static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_LED_BITSET_WORDS];
+static uint32_t sharkoon_macro_layer_leds[DYNAMIC_KEYMAP_LAYER_COUNT][SHARKOON_MACRO_LED_BITSET_WORDS];
+/*
+ * Status LEDs use compact runtime lists instead of a full LED bitset. The
+ * relatively expensive deduplication happens only while rebuilding after a
+ * VIA/Vial keymap write; normal RGB frames touch only the cached LED entries.
+ */
+static uint8_t  sharkoon_caps_lock_led_count      = 0;
+static uint8_t  sharkoon_caps_lock_leds[RGB_MATRIX_LED_COUNT];
+static uint8_t  sharkoon_unicode_typing_led_count = 0;
+static uint8_t  sharkoon_unicode_typing_leds[RGB_MATRIX_LED_COUNT];
 static bool     sharkoon_keymap_cache_dirty   = false;
+
+static void sharkoon_refresh_keymap_led_cache(void);
+
+static void sharkoon_status_led_add_unique(uint8_t *leds, uint8_t *count, uint8_t led) {
+    if (led >= RGB_MATRIX_LED_COUNT) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < *count; ++i) {
+        if (leds[i] == led) {
+            return;
+        }
+    }
+
+    leds[(*count)++] = led;
+}
+
+static void sharkoon_set_status_leds(const uint8_t *leds, uint8_t count, uint8_t r, uint8_t g, uint8_t b) {
+    for (uint8_t i = 0; i < count; ++i) {
+        rgb_matrix_set_color(leds[i], r, g, b);
+    }
+}
 
 static void sharkoon_macro_layer_add_led(uint8_t layer, uint8_t led) {
     if (layer >= DYNAMIC_KEYMAP_LAYER_COUNT || led >= RGB_MATRIX_LED_COUNT) {
         return;
     }
 
-    uint32_t      *word = &sharkoon_macro_layer_leds[layer][led / SHARKOON_BITSET_WORD_BITS];
-    const uint32_t mask = UINT32_C(1) << (led % SHARKOON_BITSET_WORD_BITS);
+    uint32_t      *word = &sharkoon_macro_layer_leds[layer][led / SHARKOON_MACRO_BITSET_WORD_BITS];
+    const uint32_t mask = UINT32_C(1) << (led % SHARKOON_MACRO_BITSET_WORD_BITS);
 
     if ((*word & mask) == 0) {
         *word |= mask;
@@ -92,12 +121,12 @@ static void sharkoon_macro_layer_add_led(uint8_t layer, uint8_t led) {
 }
 
 static void sharkoon_set_macro_layer_leds(uint8_t layer, uint8_t r, uint8_t g, uint8_t b) {
-    for (uint8_t word = 0; word < SHARKOON_LED_BITSET_WORDS; ++word) {
+    for (uint8_t word = 0; word < SHARKOON_MACRO_LED_BITSET_WORDS; ++word) {
         uint32_t bits = sharkoon_macro_layer_leds[layer][word];
 
         while (bits != 0) {
             const uint8_t bit = (uint8_t)__builtin_ctz(bits);
-            const uint8_t led = (uint8_t)(word * SHARKOON_BITSET_WORD_BITS + bit);
+            const uint8_t led = (uint8_t)(word * SHARKOON_MACRO_BITSET_WORD_BITS + bit);
 
             rgb_matrix_set_color(led, r, g, b);
 
@@ -115,13 +144,14 @@ static void sharkoon_clear_macro_select_leds(void) {
 }
 
 static void sharkoon_render_unicode_typing_led(void) {
-    if (sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_OFF || sharkoon_unicode_typing_led == NO_LED) {
+    if (sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_OFF) {
         return;
     }
 
     const uint8_t v = rgb_matrix_config.hsv.v;
-    rgb_matrix_set_color(
-        sharkoon_unicode_typing_led,
+    sharkoon_set_status_leds(
+        sharkoon_unicode_typing_leds,
+        sharkoon_unicode_typing_led_count,
         sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_RED ? v : 0,
         sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_GREEN ? v : 0,
         sharkoon_unicode_led_channel == SHARKOON_UNICODE_LED_BLUE ? v : 0
@@ -131,16 +161,12 @@ static void sharkoon_render_unicode_typing_led(void) {
 static void sharkoon_render_status_leds(void) {
     sharkoon_render_unicode_typing_led();
 
-    if (sharkoon_caps_lock_led == NO_LED) {
-        return;
-    }
-
     const uint8_t brightness = rgb_matrix_config.hsv.v;
 
     if (sharkoon_caps_lock_active) {
-        rgb_matrix_set_color(sharkoon_caps_lock_led, brightness, brightness, brightness);
+        sharkoon_set_status_leds(sharkoon_caps_lock_leds, sharkoon_caps_lock_led_count, brightness, brightness, brightness);
     } else if (sharkoon_caps_word_active) {
-        rgb_matrix_set_color(sharkoon_caps_lock_led, 0, brightness, 0);
+        sharkoon_set_status_leds(sharkoon_caps_lock_leds, sharkoon_caps_lock_led_count, 0, brightness, 0);
     }
 }
 
@@ -179,12 +205,17 @@ static void sharkoon_darkmode_refresh(void) {
         return;
     }
 
-    // RGB Matrix is sleeping; update only the event-driven status LEDs.
-    if (sharkoon_caps_lock_led != NO_LED) {
-        rgb_matrix_set_color(sharkoon_caps_lock_led, 0, 0, 0);
-    }
-    if (sharkoon_unicode_typing_led != NO_LED) {
-        rgb_matrix_set_color(sharkoon_unicode_typing_led, 0, 0, 0);
+    // RGB Matrix is sleeping; clear every previously cached status position
+    // before a possible keymap rebuild so moved keys cannot leave stale light.
+    sharkoon_set_status_leds(sharkoon_caps_lock_leds, sharkoon_caps_lock_led_count, 0, 0, 0);
+    sharkoon_set_status_leds(sharkoon_unicode_typing_leds, sharkoon_unicode_typing_led_count, 0, 0, 0);
+
+    if (sharkoon_keymap_cache_dirty) {
+        sharkoon_refresh_keymap_led_cache();
+
+        if (rgb_matrix_is_enabled()) {
+            return;
+        }
     }
 
     sharkoon_render_status_leds();
@@ -304,8 +335,8 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
 
     memset(sharkoon_macro_layer_led_count, 0, sizeof(sharkoon_macro_layer_led_count));
     memset(sharkoon_macro_layer_leds, 0, sizeof(sharkoon_macro_layer_leds));
-    sharkoon_caps_lock_led      = NO_LED;
-    sharkoon_unicode_typing_led = NO_LED;
+    sharkoon_caps_lock_led_count      = 0;
+    sharkoon_unicode_typing_led_count = 0;
 
     uint8_t layer_count = dynamic_keymap_get_layer_count();
     if (layer_count > DYNAMIC_KEYMAP_LAYER_COUNT) {
@@ -319,25 +350,24 @@ static void sharkoon_rebuild_keymap_led_cache(void) {
                 continue;
             }
 
-            uint16_t effective_keycode = dynamic_keymap_get_keycode(0, row, col);
+            uint16_t effective_keycode = KC_NO;
 
-            if (sharkoon_caps_lock_led == NO_LED &&
-                (effective_keycode == KC_CAPS || effective_keycode == SHARKOON_CAPS_KEY)) {
-                sharkoon_caps_lock_led = led;
-            }
-
-            for (uint8_t layer = 1; layer < layer_count; ++layer) {
+            for (uint8_t layer = 0; layer < layer_count; ++layer) {
                 const uint16_t keycode = dynamic_keymap_get_keycode(layer, row, col);
 
-                if (keycode != KC_TRNS) {
+                if (layer == 0 || keycode != KC_TRNS) {
                     effective_keycode = keycode;
                 }
 
-                if (sharkoon_unicode_typing_led == NO_LED && effective_keycode == UNICODE_TYPING_CYCLE) {
-                    sharkoon_unicode_typing_led = led;
+                if (keycode == KC_CAPS || keycode == SHARKOON_CAPS_KEY) {
+                    sharkoon_status_led_add_unique(sharkoon_caps_lock_leds, &sharkoon_caps_lock_led_count, led);
                 }
 
-                if (effective_keycode == REC_M0 || effective_keycode == REC_M1) {
+                if (keycode == UNICODE_TYPING_CYCLE) {
+                    sharkoon_status_led_add_unique(sharkoon_unicode_typing_leds, &sharkoon_unicode_typing_led_count, led);
+                }
+
+                if (layer > 0 && (effective_keycode == REC_M0 || effective_keycode == REC_M1)) {
                     sharkoon_macro_layer_add_led(layer, led);
                 }
             }
@@ -356,8 +386,6 @@ static void sharkoon_mark_keymap_cache_dirty(void) {
     if (!sharkoon_keymap_cache_dirty) {
         sharkoon_clear_macro_select_leds();
         sharkoon_macro_select_layer = SHARKOON_NO_LAYER;
-        sharkoon_caps_lock_led       = NO_LED;
-        sharkoon_unicode_typing_led  = NO_LED;
     }
 
     sharkoon_keymap_cache_dirty = true;
@@ -378,17 +406,7 @@ static bool sharkoon_is_dynamic_keymap_write(uint8_t command_id) {
 }
 
 static void sharkoon_rgb_observe_via_command(uint8_t *data, uint8_t length) {
-    if (length == 0) {
-        return;
-    }
-
-    const bool keymap_write = sharkoon_is_dynamic_keymap_write(data[0]);
-
-    if (sharkoon_keymap_cache_dirty && !keymap_write) {
-        sharkoon_refresh_keymap_led_cache();
-    }
-
-    if (keymap_write) {
+    if (length > 0 && sharkoon_is_dynamic_keymap_write(data[0])) {
         sharkoon_mark_keymap_cache_dirty();
     }
 }
@@ -457,6 +475,10 @@ static void sharkoon_rgb_unicode_mode_changed(uint8_t mode) {
 }
 
 bool rgb_matrix_indicators_user(void) {
+    if (sharkoon_keymap_cache_dirty) {
+        sharkoon_refresh_keymap_led_cache();
+    }
+
     if (sharkoon_darkmode_is_active()) {
         rgb_matrix_set_color_all(0, 0, 0);
     } else {
