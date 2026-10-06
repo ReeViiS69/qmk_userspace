@@ -46,18 +46,51 @@ enum custom_keycodes {
 
 #include "sharkoon_macro_recorder.inc"
 
+#ifdef VIAL_COMBO_ENABLE
+static const vial_combo_entry_t sharkoon_default_combos[] = {
+    {.input = {KC_ESC, KC_F1, KC_NO, KC_NO}, .output = KC_F13},
+    {.input = {KC_F1, KC_F2, KC_NO, KC_NO}, .output = KC_F14},
+    {.input = {KC_F2, KC_F3, KC_NO, KC_NO}, .output = KC_F15},
+    {.input = {KC_F3, KC_F4, KC_NO, KC_NO}, .output = KC_F16},
+    {.input = {KC_F4, KC_F5, KC_NO, KC_NO}, .output = KC_F17},
+    {.input = {KC_F5, KC_F6, KC_NO, KC_NO}, .output = KC_F18},
+    {.input = {KC_F6, KC_F7, KC_NO, KC_NO}, .output = KC_F19},
+    {.input = {KC_F7, KC_F8, KC_NO, KC_NO}, .output = KC_F20},
+    {.input = {KC_F8, KC_F9, KC_NO, KC_NO}, .output = KC_F21},
+    {.input = {KC_F9, KC_F10, KC_NO, KC_NO}, .output = KC_F22},
+    {.input = {KC_F10, KC_F11, KC_NO, KC_NO}, .output = KC_F23},
+    {.input = {KC_F11, KC_F12, KC_NO, KC_NO}, .output = KC_F24},
+};
+
+_Static_assert(
+    sizeof(sharkoon_default_combos) / sizeof(sharkoon_default_combos[0]) <= VIAL_COMBO_ENTRIES,
+    "VIAL_COMBO_ENTRIES is too small for the Sharkoon default combos"
+);
+#endif
+
 #ifdef VIAL_TAP_DANCE_ENABLE
 #    define SHARKOON_CAPS_KEY TD(0)
-    void eeconfig_init_user(void) {
-        const vial_tap_dance_entry_t caps_td = {
-            .on_tap              = QK_CAPS_WORD_TOGGLE,
-            .on_hold             = KC_CAPS,
-            .custom_tapping_term = TAPPING_TERM,
-        };
-    dynamic_keymap_set_tap_dance(0, &caps_td);
-}
 #else
 #    define SHARKOON_CAPS_KEY KC_CAPS
+#endif
+
+#if defined(VIAL_TAP_DANCE_ENABLE) || defined(VIAL_COMBO_ENABLE)
+void eeconfig_init_user(void) {
+#    ifdef VIAL_TAP_DANCE_ENABLE
+    const vial_tap_dance_entry_t caps_td = {
+        .on_tap              = QK_CAPS_WORD_TOGGLE,
+        .on_hold             = KC_CAPS,
+        .custom_tapping_term = TAPPING_TERM,
+    };
+    dynamic_keymap_set_tap_dance(0, &caps_td);
+#    endif
+
+#    ifdef VIAL_COMBO_ENABLE
+    for (uint8_t i = 0; i < sizeof(sharkoon_default_combos) / sizeof(sharkoon_default_combos[0]); ++i) {
+        dynamic_keymap_set_combo(i, &sharkoon_default_combos[i]);
+    }
+#    endif
+}
 #endif
 
 #include "sharkoon_rgb_runtime.inc"
@@ -196,22 +229,22 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
     // Layer 0: Basisbelegung
     [0] = LAYOUT_96_iso(
-        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12, QK_MACRO_0, QK_MACRO_1,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
+        KC_ESC,    KC_F1,     KC_F2,     KC_F3,     KC_F4,     KC_F5,     KC_F6,     KC_F7,     KC_F8,     KC_F9,     KC_F10,    KC_F11,    KC_F12,    KC_PAST,    KC_INT3,    KC_DEL,    KC_HOME, KC_PGUP,   RM_TOGG,
         KC_GRV,    KC_1,      KC_2,      KC_3,      KC_4,      KC_5,      KC_6,      KC_7,      KC_8,      KC_9,      KC_0,      KC_MINS,   KC_EQL,                KC_BSPC,    KC_INS,    KC_END,  KC_PGDN,     TG(2),
         KC_TAB,      KC_Q,      KC_W,      KC_E,      KC_R,      KC_T,      KC_Y,      KC_U,      KC_I,      KC_O,      KC_P,      KC_LBRC,   KC_RBRC,                         KC_WSCH,   MS_UP,   KC_PAUS,   KC_MPLY,
 SHARKOON_CAPS_KEY,    KC_A,      KC_S,      KC_D,      KC_F,      KC_G,      KC_H,      KC_J,      KC_K,      KC_L,      KC_SCLN,   KC_QUOT,   KC_BSLS,            KC_ENT,     MS_LEFT,   MS_DOWN, MS_RGHT,
         SC_LSPO,    KC_NUBS,   KC_Z,      KC_X,      KC_C,      KC_V,      KC_B,      KC_N,      KC_M,      KC_COMM,   KC_DOT,    KC_SLSH,       SC_RSPC,          KC_RSFT,    KC_UP,     MS_BTN4, MS_BTN5,   MS_BTN2,
-        SC_LCPO,    KC_LGUI,    SC_LAPO,                                   KC_SPC,                                    SC_RAPC,LT(1, KC_INT3), SC_RCPC,   MS_BTN1,   KC_LEFT,   KC_DOWN,   KC_RGHT, MS_BTN3
+        SC_LCPO,    KC_LGUI,    SC_LAPO,                                   KC_SPC,                                    SC_RAPC,LT(1, KC_INT1), SC_RCPC,   MS_BTN1,   KC_LEFT,   KC_DOWN,   KC_RGHT, MS_BTN3
     ),
 
     // Layer 1: Funktionen
     [1] = LAYOUT_96_iso(
-        EE_CLR,    KC_MPLY,   KC_MPRV,   KC_MNXT,   KC_MUTE,   KC_VOLD,   KC_VOLU,   RM_SPDD,   RM_SPDU,   QK_MACRO_0,QK_MACRO_1,KC_SCRL,   KC_PSCR,   REC_STOP, REC_STOP,    SOCDTOG,   RM_SATU,   RM_SPDU, RGB_DARK,
+        EE_CLR,    _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   QK_MACRO_0,QK_MACRO_1,KC_SCRL,   KC_PSCR,   _______,  _______,    SOCDTOG,   RM_SATU,   RM_SPDU, RGB_DARK,
         _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,              _______,    _______,   RM_SATD,   RM_SPDD, _______,
         MACRO_SELECT,_______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,                        _______,   MS_WHLU,   _______, UNICODE_TYPING_CYCLE,
         REC_STOP,     _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,           _______,    MS_WHLL,   MS_WHLD,   MS_WHLR,
-        _______,    _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,       _______,         _______,    RM_VALU,   _______,   _______, _______,
-        _______,    GU_TOGG,    _______,                                   _______,                                    _______,   _______,   _______,   _______,   RM_HUEU,   RM_VALD,   RM_NEXT,   _______
+        KC_VOLU,    _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,   _______,       _______,         _______,    RM_VALU,   _______,   _______, _______,
+        KC_VOLD,    GU_TOGG,    _______,                                   _______,                                    _______,   _______,   _______,   _______,   RM_HUEU,   RM_VALD,   RM_NEXT,   _______
     ),
 
     // Deutsch-auf-US Raw-Kompatibilitaet.
