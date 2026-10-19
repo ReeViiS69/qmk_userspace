@@ -76,18 +76,16 @@
 // Hold: Left / Right Shift
 #define LSPO_KEYS KC_LSFT, KC_LSFT, KC_8
 #define RSPC_KEYS KC_RSFT, KC_RSFT, KC_9
-
 // Ctrl
-// Tap: { / }
-// Hold: Left / Right Ctrl
-#define LCPO_KEYS KC_LCTL, KC_RALT, KC_7
-#define RCPC_KEYS KC_RCTL, KC_RALT, KC_0
-
-// Alt / AltGr
 // Tap: [ / ]
+// Hold: Left / Right Ctrl
+#define LCPO_KEYS KC_LCTL, KC_RALT, KC_8
+#define RCPC_KEYS KC_RCTL, KC_RALT, KC_9
+// Alt / AltGr
+// Tap: { / }
 // Hold: Left Alt / Right Alt (AltGr)
-#define LAPO_KEYS KC_LALT, KC_RALT, KC_8
-#define RAPC_KEYS KC_RALT, KC_RALT, KC_9
+#define LAPO_KEYS KC_LALT, KC_RALT, KC_7
+#define RAPC_KEYS KC_RALT, KC_RALT, KC_0
 
 
 /*
